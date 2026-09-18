@@ -1,0 +1,7 @@
+.slim/deepwork/
+geektaco.db
+geektaco.inv
+geektaco.key
+*.o
+*.elf
+geektaco
