@@ -142,7 +142,7 @@ SYNC_EVERY      equ 32
 MS_ASYNC        equ 1
 
 ; ---- net ------------------------------------------------------------------
-PORT_BE         equ 0x901F      ; htons(8080)
+PORT_BE         equ 0x9A1F      ; htons(8090)
 AF_INET         equ 2
 SOCK_STREAM     equ 1
 SOL_SOCKET      equ 1

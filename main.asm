@@ -718,7 +718,7 @@ listen_address:
     dw AF_INET, PORT_BE
     dd 0
     dq 0
-banner: db 'geektaco http://0.0.0.0:8080', 10
+banner: db 'geektaco http://0.0.0.0:8090', 10
 banner_len equ $ - banner
 database_error: db 'database failed', 10
 database_error_len equ $ - database_error

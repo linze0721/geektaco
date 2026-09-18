@@ -4,7 +4,7 @@
 set -e
 cd "$(dirname "$0")"
 
-PORT=8080
+PORT=8090
 rm -f geektaco.db geektaco.inv geektaco.key
 
 ./geektaco > /tmp/gt.log 2>&1 &
@@ -162,9 +162,9 @@ N0=$(C "$U/" | grep -o 'href="/t/' | wc -l)
 N1=$(C "$U/p/1" | grep -o 'href="/t/' | wc -l)
 [ "$N0" = "25" ] || fail "page 0 shows $N0 threads, want 25"
 echo "  page 0: $N0, page 1: $N1"
-has "older" "$(C "$U/")" "page 0 missing the older link"
-hasnt "newer" "$(C "$U/")" "page 0 must not offer a newer link"
-has "newer" "$(C "$U/p/1")" "page 1 missing the newer link"
+has "next" "$(C "$U/")" "page 0 missing the older link"
+hasnt "prev" "$(C "$U/")" "page 0 must not offer a newer link"
+has "prev" "$(C "$U/p/1")" "page 1 missing the newer link"
 # A malformed page number is a bad URL, not silently page 0.
 has "404" "$(C -i "$U/p/abc")" "/p/abc should 404"
 has "404" "$(C -i "$U/t/0/abc")" "/t/0/abc should 404"

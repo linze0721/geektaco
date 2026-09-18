@@ -26,173 +26,15 @@ extern inv_count, inv_rec
 
 section .rodata
 
-s_200:   db 'HTTP/1.0 200 OK', 13, 10, 0
-s_404a:  db 'HTTP/1.0 404 Not Found', 13, 10, 0
-s_302a:  db 'HTTP/1.0 302 Found', 13, 10, 'Location: ', 0
-s_crlf:  db 13, 10, 0
-s_hdr:   db 'Content-Type: text/html; charset=utf-8', 13, 10
-         db 'Connection: close', 13, 10, 13, 10, 0
-
+; HTML entities. Kept out of the compressed table: ob_put_esc emits them
+; through ob_put (no expansion), so they must be plain literals.
 e_amp:   db '&amp;', 0
 e_lt:    db '&lt;', 0
 e_gt:    db '&gt;', 0
 e_quot:  db '&quot;', 0
 e_apos:  db '&#39;', 0
 
-; Dark brutalist terminal theme: near-black bg, soft green text, amber accent.
-; <html><head><body> open tags are omitted: the HTML parser infers them.
-s_head:  db '<!doctype html><meta charset=utf-8>'
-         db '<meta name=viewport content="width=device-width,initial-scale=1">'
-         db '<title>geektaco</title><style>'
-         db 'body{font:16px/1.5 monospace;background:#111;color:#8e8;'
-         db 'max-width:46rem;margin:auto;padding:2rem 1rem}'
-         db 'a{color:#da6}'
-         db 'h1,h2{color:#da6;font-weight:400}'
-         db 'h1{font-size:1.6rem;margin:0}'
-         db 'h2{font-size:1rem}'
-         db 'header{border-bottom:1px solid #232;padding-bottom:1rem;margin-bottom:1rem}'
-         db '.g{margin:0}'
-         db '.t{padding:.6rem 0;border-bottom:1px solid #232}'
-         db '.e,.g,.m,label{color:#474}'
-         db '.m,label{font-size:.8rem}'
-         db '.p,form{border:1px solid #232;padding:1rem;margin:1rem 0}'
-         db '.p .m{color:#da6}'
-         db 'pre{white-space:pre-wrap;margin:0;font:inherit}'
-         db 'label{display:block;margin:.8rem 0 .3rem}'
-         db 'input,textarea{display:block;width:100%;background:#010;color:#8e8;'
-         db 'border:1px solid #242;padding:.5rem;font:inherit}'
-         db ':focus{outline:1px solid #da6}'
-         db '[type=submit]{width:auto;background:#232;color:#da6;cursor:pointer}'
-         db '.e{border:1px dashed #242;padding:1rem}'
-; Admin tables: forms are block-level by default, which would break each row
-; across lines, and the shared form border would box every button.
-         db 'table{width:100%;border-collapse:collapse;font-size:.85rem}'
-         db 'td{padding:.4rem .5rem;border-bottom:1px solid #1a2a1c;'
-         db 'vertical-align:middle}'
-         db 'td form{display:inline;border:0;padding:0;margin:0}'
-         db 'td [type=submit]{padding:.2rem .5rem;font-size:.8rem}'
-         db 'table.s{width:auto;margin-bottom:1.5rem}'
-         db 'table.s td{border:0;padding:.15rem .8rem .15rem 0}'
-         db 'td.n{text-align:right;color:#8e8}'
-         db 'td.w{text-align:right;color:#da6}'
-         db '</style>', 0
-
-; Literal U+00B7 middle dots (2 bytes) replace the 8-byte &middot; entity.
-s_idx_top: db '<header><h1>geektaco</h1>'
-           db '<p class=g>minimalist forum ', 0xC2, 0xB7, ' pure x86_64 asm ', 0xC2, 0xB7, ' no libc</p>'
-           db '</header>', 0
-s_th_a:  db '<div class=t><a href="/t/', 0
-s_th_b:  db '">', 0
-s_th_c:  db '</a><div class=m>by ', 0
-s_dot:   db ' ', 0xC2, 0xB7, ' ', 0
-s_th_e:  db ' replies</div></div>', 0
-s_empty: db '<p class=e>// no threads yet. be the first to post.</p>', 0
-; Shared form fragments: identical markup in the new-thread and reply forms.
-s_f_a:   db '<label>author</label><input name=a maxlength=23 required>', 0
-s_f_b:   db '<label>body</label><textarea name=b maxlength=399 required></textarea>', 0
-s_newform: db '<h2>new thread</h2>'
-           db '<form method=post action=/new>', 0
-s_newform2: db '<label>title</label><input name=t maxlength=79 required>', 0
-s_newform3: db '<input type=submit value="post"></form>'
-           db '</body></html>', 0
-
-s_t_top: db '<header><a href="/">geektaco</a><span class=g> / thread</span></header>'
-         db '<h1>', 0
-s_h1b:   db '</h1><div class=p><div class=m>', 0
-s_post_c: db '</div><pre>', 0
-s_post_d: db '</pre></div>', 0
-s_repl_a: db '<h2>reply</h2><form method=post action=/reply>'
-          db '<input type=hidden name=p value=', 0
-s_repl_b: db '<input type=submit value="reply"></form>'
-          db '</body></html>', 0
-s_404body: db '<h1>404</h1><p>nothing here. <a href="/">back to index</a></p>'
-          db '</body></html>', 0
-s_red_a: db '<p>moved: <a href="', 0
-s_red_c: db '</a></p>', 0
-s_untitled: db '(untitled)', 0
-s_anon:  db 'anonymous', 0
-
-; ---- pagination nav -------------------------------------------------------
-s_nv_a:  db '<nav>', 0
-s_nv_nw: db '<a href="', 0
-s_nv_nwt: db '">newer</a>', 0
-s_nv_pg: db '<span class=m> page ', 0
-s_nv_pge: db ' </span>', 0
-s_nv_odt: db '">older</a>', 0
-s_nv_end: db '</nav>', 0
-s_pfx_p: db '/p/', 0
-s_pfx_t: db '/t/', 0
-s_slash: db '/', 0
-
-; ---- v2 pages -------------------------------------------------------------
-; The cookie IS the auth token, so HttpOnly (no script access) and
-; SameSite=Strict (no cross-site submission) are load-bearing, not hygiene.
-s_ck_a:  db 'Set-Cookie: ', 0
-s_ck_b:  db '=', 0
-s_ck_c:  db '; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000', 13, 10, 0
-s_403a:  db 'HTTP/1.0 403 Forbidden', 13, 10, 0
-
-s_joined: db '<h1>welcome</h1><p class=e>code accepted. you can post now.</p>'
-          db '<p><a href="/">-> the forum</a></p></body></html>', 0
-s_join_a: db '<header><a href="/">geektaco</a><span class=g> / join</span></header>'
-          db '<h1>invite only</h1>'
-          db '<p class=m>geektaco runs on invite codes. paste yours below.</p>', 0
-s_join_err: db '<p class=e>that code is invalid, revoked, or mistyped.</p>', 0
-s_join_b: db '<form method=post action=/join>'
-          db '<label>invite code</label>'
-          db '<input name=c maxlength=16 required autofocus>'
-          db '<input type=submit value="redeem"></form>'
-          db '<p class=m><a href="/">browse without posting</a></p>'
-          db '</body></html>', 0
-s_403body: db '<header><a href="/">geektaco</a></header>'
-           db '<h1>403</h1><p>posting needs an invite. '
-           db '<a href="/join">redeem a code</a></p></body></html>', 0
-s_nav:    db '<p class=m><a href="/join">have an invite?</a></p>', 0
-
-; admin panel
-s_adm_hdr: db '<header><a href="/">geektaco</a><span class=g> / admin</span></header>', 0
-; Stats sit between the header and the invites table. The uncommitted count is
-; the one diagnostic number here: nonzero means a worker died mid-write.
-s_st_a:   db '<table class=s>', 0
-s_st_r:   db '<tr><td>', 0
-s_st_v:   db '</td><td class=n>', 0
-s_st_e:   db '</td></tr>', 0
-s_st_warn: db '</td><td class=w>', 0
-s_st_z:   db '</table>', 0
-s_l_slot: db 'slots', 0
-s_l_live: db 'committed', 0
-s_l_hole: db 'uncommitted', 0
-s_l_del:  db 'deleted', 0
-s_l_root: db 'threads', 0
-s_l_rep:  db 'replies', 0
-s_l_inv:  db 'invites', 0
-s_l_free: db 'unused', 0
-s_l_uses: db 'redeemed', 0
-s_l_rev:  db 'revoked', 0
-s_adm_top: db '<h1>invites</h1>'
-           db '<form method=post action=/admin/inv>'
-           db '<input type=submit value="create invite"></form>'
-           db '<table>', 0
-s_adm_inv: db '<tr><td>', 0
-s_adm_td:  db '</td><td>', 0
-s_adm_rev: db '</td><td><form method=post action=/admin/rev>'
-           db '<input type=hidden name=i value=', 0
-s_adm_revb: db '><input type=submit value="revoke"></form>', 0
-s_adm_del: db '</td><td><form method=post action=/admin/del>'
-           db '<input type=hidden name=i value=', 0
-s_adm_delb: db '><input type=submit value="delete"></form>', 0
-s_adm_tr:  db '</td></tr>', 0
-s_adm_mid: db '</table><h1>posts</h1><table>', 0
-s_adm_end: db '</table></body></html>', 0
-s_st_rev:  db 'revoked', 0
-s_st_free: db 'unused', 0
-s_st_used: db 'used by post ', 0
-s_st_unc:  db 'uncommitted', 0
-s_st_del:  db 'deleted', 0
-s_st_ok:   db 'live', 0
-s_reply_to: db '(reply to ', 0
-s_paren:   db ')', 0
-s_inv_col: db 'inv ', 0
+%include "strtab.inc"
 
 section .text
 
@@ -229,18 +71,49 @@ ob_put:
         ret
 
 ; ---------------------------------------------------------------------------
-; ob_puts(rdi=NUL-terminated string) -- append it raw, no escaping.
-; clobbers: rax, rcx, rdx, rsi, rdi.
+; ob_puts(rdi=NUL-terminated string) -- append it, expanding dictionary tokens.
+;
+; Bytes in TOK_LO..TOK_HI are indices into str_dict and expand recursively;
+; everything else is emitted raw. The generator guarantees those byte values
+; never occur literally in the corpus.
+;
+; EXPANSION IS LITERAL-ONLY. ob_put and ob_put_esc deliberately do NOT expand,
+; because they carry user data: a poster who submitted a raw 0x03 byte would
+; otherwise have it turn into live markup. ob_put_esc drops control bytes
+; below 0x20 anyway, but the separation is the actual guarantee -- do not
+; "unify" these two paths.
+; clobbers: caller-saved regs; preserves rbx, r12.
 ob_puts:
-        mov     rsi, rdi
-.scan:
-        cmp     byte [rsi], 0
-        je      .go
-        inc     rsi
-        jmp     .scan
-.go:
-        sub     rsi, rdi                ; length
-        jmp     ob_put
+        push    rbx
+        push    r12
+        mov     r12, rdi
+.next:
+        movzx   eax, byte [r12]
+        test    al, al
+        jz      .done
+        inc     r12
+        cmp     al, TOK_LO
+        jb      .raw
+        cmp     al, TOK_HI
+        ja      .raw
+        ; token: recurse into its dictionary entry
+        ; NASM folds `[sym + (rax-K)*2]` into a bogus (rax,rax) form and drops
+        ; the symbol, so compute the index explicitly.
+        sub     eax, TOK_LO
+        mov     edx, str_dict_off
+        movzx   eax, word [rdx + rax*2]
+        mov     edi, str_dict
+        add     rdi, rax
+        call    ob_puts
+        jmp     .next
+.raw:
+        mov     edi, eax
+        call    ob_putc
+        jmp     .next
+.done:
+        pop     r12
+        pop     rbx
+        ret
 
 ; ---------------------------------------------------------------------------
 ; ob_putc(dil=byte) -- append a single byte.
@@ -367,6 +240,15 @@ ob_put_esc_z:
 ; ---------------------------------------------------------------------------
 ; emit_head -- local helper: shared doctype/head/style so all pages match.
 ; clobbers: caller-saved regs.
+; emit_200() -- reset the buffer and emit the 200 status line, the standard
+; headers, and the document head. Four page builders opened identically.
+; rbx must already hold the TLS base. clobbers: caller-saved regs.
+emit_200:
+        mov     qword [rbx + TLS_OBLEN], 0
+        mov     edi, s_200
+        call    ob_puts
+        mov     edi, s_hdr
+        call    ob_puts
 emit_head:
         mov     edi, s_head
         jmp     ob_puts
@@ -387,6 +269,163 @@ ef_a:
         jmp     esc_field
 
 ; ---------------------------------------------------------------------------
+; ob_putdate(edi=unix epoch seconds) -- "1999-12-31 23:59 UTC".
+; A raw epoch integer is an unfinished-looking detail on a message board, and
+; a board of this era always showed a readable date.
+;
+; Uses Howard Hinnant's civil_from_days: shift the epoch to an era beginning
+; on 0000-03-01 so leap days land at the end of the cycle, then invert the
+; 146097-day/400-year and 1461-day/4-year cycles with integer arithmetic only.
+; No libc, no tables, no division by a non-constant.
+; clobbers: caller-saved regs; preserves rbx, r12-r14.
+ob_putdate:
+        push    rbx
+        push    rbp
+        push    r12
+        push    r13
+        push    r14
+        mov     r14d, edi               ; epoch seconds (unsigned 32-bit)
+
+        mov     eax, r14d
+        xor     edx, edx
+        mov     ecx, 86400
+        div     ecx                     ; eax = days, edx = second of day
+        mov     r13d, edx               ; keep the time of day
+        mov     r12d, eax               ; days since 1970-01-01
+
+        ; --- civil_from_days ---------------------------------------------
+        add     r12d, 719468            ; shift epoch to 0000-03-01
+        mov     eax, r12d
+        xor     edx, edx
+        mov     ecx, 146097
+        div     ecx                     ; eax = era, edx = day of era
+        mov     r8d, eax                ; era
+        mov     r9d, edx                ; doe
+
+        ; yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365
+        mov     eax, r9d
+        xor     edx, edx
+        mov     ecx, 1460
+        div     ecx
+        mov     r10d, r9d
+        sub     r10d, eax
+        mov     eax, r9d
+        xor     edx, edx
+        mov     ecx, 36524
+        div     ecx
+        add     r10d, eax
+        mov     eax, r9d
+        xor     edx, edx
+        mov     ecx, 146096
+        div     ecx
+        sub     r10d, eax
+        mov     eax, r10d
+        xor     edx, edx
+        mov     ecx, 365
+        div     ecx
+        mov     r10d, eax               ; yoe
+
+        ; doy = doe - (365*yoe + yoe/4 - yoe/100)
+        imul    eax, r10d, 365
+        mov     r11d, eax
+        mov     eax, r10d
+        shr     eax, 2
+        add     r11d, eax
+        mov     eax, r10d
+        xor     edx, edx
+        mov     ecx, 100
+        div     ecx
+        sub     r11d, eax
+        mov     ecx, r9d
+        sub     ecx, r11d               ; ecx = doy
+
+        ; mp = (5*doy + 2)/153 ; d = doy - (153*mp+2)/5 + 1
+        imul    eax, ecx, 5
+        add     eax, 2
+        xor     edx, edx
+        mov     r11d, 153
+        div     r11d
+        mov     r11d, eax               ; mp
+        imul    eax, r11d, 153
+        add     eax, 2
+        xor     edx, edx
+        mov     esi, 5
+        div     esi
+        sub     ecx, eax
+        inc     ecx
+        mov     ebx, ecx                ; day -> rbx: ob_putu/ob_putc clobber
+                                        ; ecx, and the day is emitted last.
+
+        ; m = mp < 10 ? mp+3 : mp-9 ; y = yoe + era*400 + (m <= 2)
+        mov     eax, r11d
+        cmp     r11d, 10
+        jb      .m_early
+        sub     eax, 9
+        jmp     .m_done
+.m_early:
+        add     eax, 3
+.m_done:
+        mov     r11d, eax               ; month
+        imul    eax, r8d, 400
+        add     eax, r10d
+        cmp     r11d, 2
+        ja      .y_done
+        inc     eax                     ; Jan/Feb belong to the next year
+.y_done:
+        mov     r12d, eax               ; year  -> callee-saved
+        mov     r14d, r11d              ; month -> callee-saved
+
+        ; --- emit "YYYY-MM-DD HH:MM UTC" ---------------------------------
+        ; Every field lives in a callee-saved register: the emit helpers are
+        ; free to clobber the caller-saved set between fields.
+        ; Split the time of day before emitting so all five fields are live
+        ; in callee-saved registers and one loop can walk them.
+        mov     eax, r13d
+        xor     edx, edx
+        mov     ecx, 3600
+        div     ecx
+        mov     r13d, eax               ; hour
+        mov     eax, edx
+        xor     edx, edx
+        mov     ecx, 60
+        div     ecx
+        mov     ebp, eax                ; minute
+        ; Emit year, then four padded fields each preceded by its separator.
+        mov     edi, r12d
+        call    ob_putu
+        mov     r12d, s_dsep            ; "-- :"
+.dt_emit:
+        movzx   edi, byte [r12]
+        call    ob_putc
+        mov     edi, r14d               ; month
+        mov     r14d, ebx               ; rotate: month<-day<-hour<-minute
+        mov     ebx, r13d
+        mov     r13d, ebp
+        call    .pad2
+        inc     r12
+        cmp     byte [r12], 0
+        jne     .dt_emit
+        mov     edi, s_utc
+        call    ob_puts
+        pop     r14
+        pop     r13
+        pop     r12
+        pop     rbp
+        pop     rbx
+        ret
+
+; .pad2(edi=value 0..99) -- two digits, zero padded.
+.pad2:
+        cmp     edi, 10
+        jae     .p2_wide
+        push    rdi
+        mov     dil, '0'
+        call    ob_putc
+        pop     rdi
+.p2_wide:
+        jmp     ob_putu
+
+; ---------------------------------------------------------------------------
 ; emit_post(rdi=record) -- one <div class=p> block (meta line + pre body).
 ; Emits s_h1b (h1 close + post div open) then the post body.
 ; clobbers: caller-saved regs; preserves rbx.
@@ -404,7 +443,7 @@ emit_post:
         mov     edi, s_dot            ; middle dot
         call    ob_puts
         mov     edi, [rbx + R_TIME]
-        call    ob_putu                 ; raw epoch seconds
+        call    ob_putdate
         mov     edi, s_post_c         ; </div><pre>
         call    ob_puts
         lea     rdi, [rbx + R_BODY]
@@ -463,8 +502,6 @@ emit_nav:
         mov     edi, s_nv_odt         ; ">older</a>
         call    ob_puts
 .close:
-        mov     edi, s_nv_end
-        call    ob_puts
 .none:
         pop     r15
         pop     r14
@@ -522,18 +559,15 @@ render_index:
         ; every register is already spoken for by the scan.
         mov     [rbx + TLS_PAGE], rdi   ; requested page
         mov     qword [rbx + TLS_MORE], 0
-        mov     qword [rbx + TLS_OBLEN], 0
-        mov     edi, s_200
-        call    ob_puts
-        mov     edi, s_hdr
-        call    ob_puts
-        call    emit_head
+        call    emit_200
         mov     edi, s_idx_top
         call    ob_puts
         call    db_count
         mov     r12, rax                ; snapshot of the allocation cursor
         test    r12, r12
         jz      .empty
+        mov     edi, s_ul_a             ; <ul> wraps rows only, never the
+        call    ob_puts                 ; empty-state paragraph
         mov     r13, r12                ; i runs r12-1 .. 0: newest first
         xor     r14d, r14d              ; matching roots seen so far
         xor     r15d, r15d              ; roots emitted on this page
@@ -589,13 +623,17 @@ render_index:
         ; Stop the moment the page is full. Walking on to record 0 and
         ; discarding would make page 0 O(n) again, which is the whole point.
         mov     qword [rbx + TLS_MORE], 1  ; more rows exist: show "older"
-        jmp     .form
+        jmp     .listend
 .next:
         test    r13, r13
         jnz     .outer                  ; stop after index 0 was processed
-        jmp     .form
+        jmp     .listend
 .empty:
         mov     edi, s_empty
+        call    ob_puts
+        jmp     .form
+.listend:
+        mov     edi, s_ul_b             ; </ul>
         call    ob_puts
 .form:
         mov     rdi, [rbx + TLS_PAGE]
@@ -649,12 +687,7 @@ render_thread:
         mov     r13, rax                ; direct root pointer until reply scan
         cmp     dword [r13 + R_PARENT], r12d ; must be a root record
         jne     .notfound
-        mov     qword [rbx + TLS_OBLEN], 0
-        mov     edi, s_200
-        call    ob_puts
-        mov     edi, s_hdr
-        call    ob_puts
-        call    emit_head
+        call    emit_200
         mov     edi, s_t_top          ; header + <h1>
         call    ob_puts
         mov     eax, R_TITLE
@@ -802,12 +835,7 @@ render_join:
         push    r12
         mov     r12, rdi                ; error flag
         mov     rbx, [fs:TLS_SELF]
-        mov     qword [rbx + TLS_OBLEN], 0
-        mov     edi, s_200
-        call    ob_puts
-        mov     edi, s_hdr
-        call    ob_puts
-        call    emit_head
+        call    emit_200
         mov     edi, s_join_a
         call    ob_puts
         test    r12, r12
@@ -948,41 +976,30 @@ emit_stats:
         mov     edi, s_l_slot
         mov     rsi, [r14]
         call    .row
-        mov     edi, s_l_live
-        mov     rsi, [r14 + 8]
-        call    .row
-        ; The only number that signals a fault, so it is the only one that
-        ; changes colour -- and only when it is actually nonzero.
-        mov     edi, s_l_hole
-        mov     rsi, [r14 + 16]
+        ; The ten labels are consecutive NUL-terminated strings and the ten
+        ; counters are consecutive qwords, so one loop walks both in step.
+        ; Unrolled this was ten 13-byte blocks.
+        mov     r12d, s_l_live          ; -> next label
+        lea     r13, [r14 + 8]          ; -> next counter
+.stat_row:
+        mov     rsi, [r13]
+        mov     edi, r12d
+        cmp     r12d, s_l_hole
+        jne     .stat_plain
         test    rsi, rsi
-        jz      .hole_ok
-        call    .row_warn
-        jmp     .rest
-.hole_ok:
+        jz      .stat_plain
+        call    .row_warn               ; the one diagnostic number
+        jmp     .stat_next
+.stat_plain:
         call    .row
-.rest:
-        mov     edi, s_l_del
-        mov     rsi, [r14 + 24]
-        call    .row
-        mov     edi, s_l_root
-        mov     rsi, [r14 + 32]
-        call    .row
-        mov     edi, s_l_rep
-        mov     rsi, [r14 + 40]
-        call    .row
-        mov     edi, s_l_inv
-        mov     rsi, [r14 + 48]
-        call    .row
-        mov     edi, s_l_free
-        mov     rsi, [r14 + 56]
-        call    .row
-        mov     edi, s_l_uses
-        mov     rsi, [r14 + 64]
-        call    .row
-        mov     edi, s_l_rev
-        mov     rsi, [r14 + 72]
-        call    .row
+.stat_next:
+        add     r13, 8
+.stat_skip:                             ; advance past this label's NUL
+        cmp     byte [r12], 0
+        lea     r12, [r12 + 1]
+        jne     .stat_skip
+        cmp     r12d, s_l_end
+        jb      .stat_row
         mov     edi, s_st_z
         call    ob_puts
         pop     r14
@@ -1005,8 +1022,6 @@ emit_stats:
         call    ob_puts
         mov     rdi, r15
         call    ob_putu
-        mov     edi, s_st_e
-        call    ob_puts
         pop     r15
         ret
 .row_warn:
@@ -1021,8 +1036,6 @@ emit_stats:
         call    ob_puts
         mov     rdi, r15
         call    ob_putu
-        mov     edi, s_st_e
-        call    ob_puts
         pop     r15
         ret
 
@@ -1039,12 +1052,7 @@ render_admin:
         push    r14
         push    r15
         mov     rbx, [fs:TLS_SELF]
-        mov     qword [rbx + TLS_OBLEN], 0
-        mov     edi, s_200
-        call    ob_puts
-        mov     edi, s_hdr
-        call    ob_puts
-        call    emit_head
+        call    emit_200
         mov     edi, s_adm_hdr
         call    ob_puts
         call    emit_stats
@@ -1084,8 +1092,6 @@ render_admin:
         jz      .inv_used
         mov     edi, s_st_rev
         call    ob_puts
-        mov     edi, s_adm_tr           ; no revoke button for a revoked invite
-        call    ob_puts
         jmp     .inv_next
 .inv_used:
         mov     r14d, [rbp + I_USED]
@@ -1105,8 +1111,6 @@ render_admin:
         mov     rdi, r13
         call    ob_putu
         mov     edi, s_adm_revb
-        call    ob_puts
-        mov     edi, s_adm_tr
         call    ob_puts
 .inv_next:
         inc     r13
@@ -1137,8 +1141,6 @@ render_admin:
         cmp     dword [rbp + R_TIME], 0
         jne     .post_live
         mov     edi, s_st_unc           ; reserved but never published
-        call    ob_puts
-        mov     edi, s_adm_tr
         call    ob_puts
         jmp     .post_next
 .post_live:
@@ -1179,8 +1181,6 @@ render_admin:
         jz      .post_btn
         mov     edi, s_st_del
         call    ob_puts
-        mov     edi, s_adm_tr           ; already deleted: no button
-        call    ob_puts
         jmp     .post_next
 .post_btn:
         mov     edi, s_st_ok
@@ -1190,8 +1190,6 @@ render_admin:
         mov     rdi, r13
         call    ob_putu
         mov     edi, s_adm_delb
-        call    ob_puts
-        mov     edi, s_adm_tr
         call    ob_puts
 .post_next:
         test    r13, r13
