@@ -156,13 +156,32 @@ C -o /dev/null "$U/t/99999999999999999999"
 C -o /dev/null "$U/t/abc"
 kill -0 $SRV 2>/dev/null || fail "server died on malformed input"
 
-echo "== 18. persistence across restart =="
+echo "== 18. pagination =="
+# 45 records exist by now, of which 42 are roots: 25 on page 0, 17 on page 1.
+N0=$(C "$U/" | grep -o 'href="/t/' | wc -l)
+N1=$(C "$U/p/1" | grep -o 'href="/t/' | wc -l)
+[ "$N0" = "25" ] || fail "page 0 shows $N0 threads, want 25"
+echo "  page 0: $N0, page 1: $N1"
+has "older" "$(C "$U/")" "page 0 missing the older link"
+hasnt "newer" "$(C "$U/")" "page 0 must not offer a newer link"
+has "newer" "$(C "$U/p/1")" "page 1 missing the newer link"
+# A malformed page number is a bad URL, not silently page 0.
+has "404" "$(C -i "$U/p/abc")" "/p/abc should 404"
+has "404" "$(C -i "$U/t/0/abc")" "/t/0/abc should 404"
+# The canonical first page and its explicit form agree.
+[ "$(C "$U/t/0" | md5sum)" = "$(C "$U/t/0/0" | md5sum)" ] \
+  || fail "/t/0 and /t/0/0 differ"
+
+echo "== 19. persistence across restart =="
 kill $SRV; wait $SRV 2>/dev/null || true
 ./geektaco > /tmp/gt2.log 2>&1 &
 SRV=$!
 sleep 0.5
-R=$(C "$U/")
+# Record 0 is on a later index page now that 45 records exist, so check the
+# thread page directly -- that is what "the data survived" actually means.
+R=$(C "$U/t/0")
 has "hello" "$R" "data lost across restart"
+has "reply 3" "$R" "replies lost across restart"
 [ "$(cat geektaco.key)" = "$KEY" ] || fail "admin key regenerated on restart"
 grep -q "Admin key" /tmp/gt2.log && fail "key reprinted on restart" || true
 R=$(C -i -b "ga=$KEY" "$U/admin")

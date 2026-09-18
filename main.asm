@@ -174,19 +174,38 @@ _start:
 
 .get:
     cmp ecx, 1
-    jne .get_join
+    jne .get_page
     cmp byte [rdi], '/'
     jne .not_found
+    xor edi, edi                    ; page 0
     call render_index
     jmp .respond
 
+.get_page:
+    cmp ecx, 4                      ; "/p/" + at least one digit
+    jb .get_join
+    cmp word [rdi], '/p'
+    jne .get_join
+    cmp byte [rdi + 2], '/'
+    jne .get_join
+    add rdi, 3
+    lea esi, [rcx - 3]
+    call parse_uint
+    test edx, edx
+    jz .not_found                   ; "/p/abc" is malformed, not page 0
+    mov edi, eax
+    call render_index
+    jmp .respond
+
+; A non-matching path of the same length MUST fall through, not 404: "/t/60"
+; is also 5 bytes, and "/t/123" is also 6.
 .get_join:
     cmp ecx, 5
     jne .get_admin
     cmp dword [rdi], '/joi'
-    jne .not_found
+    jne .get_admin
     cmp byte [rdi + 4], 'n'
-    jne .not_found
+    jne .get_admin
     xor edi, edi                    ; no error yet
     call render_join
     jmp .respond
@@ -203,6 +222,8 @@ _start:
     call render_admin
     jmp .respond
 
+; /t/<n> and /t/<n>/<m>. The trailing segment, when present, must parse: a
+; malformed "/t/0/abc" is a bad URL, not silently page 0.
 .get_thread:
     cmp ecx, 3
     jb .not_found
@@ -212,10 +233,40 @@ _start:
     jne .not_found
     add rdi, 3
     lea esi, [rcx - 3]
+    ; parse_uint clobbers every caller-saved register, so the cursor and the
+    ; remaining length are spilled; the root index goes in rbp, which is
+    ; callee-saved and therefore survives the second parse without a push
+    ; that the .not_found exits would have to unwind.
+    push rsi
+    push rdi
     call parse_uint
+    pop rdi
+    pop rsi
     test edx, edx
     jz .not_found
-    mov edi, eax
+    mov ebp, eax                    ; root index
+    sub esi, edx                    ; bytes after the index digits
+    jz .thread_p0
+    add rdi, rdx                    ; advance past the digits
+    cmp byte [rdi], '/'
+    jne .not_found
+    inc rdi
+    dec esi
+    jz .not_found                   ; "/t/<n>/" with no page number
+    push rsi
+    call parse_uint
+    pop rsi
+    test edx, edx
+    jz .not_found
+    cmp edx, esi
+    jne .not_found                  ; trailing junk after the page number
+    mov esi, eax
+    mov edi, ebp
+    call render_thread
+    jmp .respond
+.thread_p0:
+    mov edi, ebp
+    xor esi, esi
     call render_thread
     jmp .respond
 

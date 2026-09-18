@@ -71,6 +71,10 @@ s_head:  db '<!doctype html><meta charset=utf-8>'
          db 'vertical-align:middle}'
          db 'td form{display:inline;border:0;padding:0;margin:0}'
          db 'td [type=submit]{padding:.2rem .5rem;font-size:.8rem}'
+         db 'table.s{width:auto;margin-bottom:1.5rem}'
+         db 'table.s td{border:0;padding:.15rem .8rem .15rem 0}'
+         db 'td.n{text-align:right;color:#8e8}'
+         db 'td.w{text-align:right;color:#da6}'
          db '</style>', 0
 
 ; Literal U+00B7 middle dots (2 bytes) replace the 8-byte &middot; entity.
@@ -108,6 +112,18 @@ s_red_c: db '</a></p>', 0
 s_untitled: db '(untitled)', 0
 s_anon:  db 'anonymous', 0
 
+; ---- pagination nav -------------------------------------------------------
+s_nv_a:  db '<nav>', 0
+s_nv_nw: db '<a href="', 0
+s_nv_nwt: db '">newer</a>', 0
+s_nv_pg: db '<span class=m> page ', 0
+s_nv_pge: db ' </span>', 0
+s_nv_odt: db '">older</a>', 0
+s_nv_end: db '</nav>', 0
+s_pfx_p: db '/p/', 0
+s_pfx_t: db '/t/', 0
+s_slash: db '/', 0
+
 ; ---- v2 pages -------------------------------------------------------------
 ; The cookie IS the auth token, so HttpOnly (no script access) and
 ; SameSite=Strict (no cross-site submission) are load-bearing, not hygiene.
@@ -134,8 +150,26 @@ s_403body: db '<header><a href="/">geektaco</a></header>'
 s_nav:    db '<p class=m><a href="/join">have an invite?</a></p>', 0
 
 ; admin panel
-s_adm_top: db '<header><a href="/">geektaco</a><span class=g> / admin</span></header>'
-           db '<h1>invites</h1>'
+s_adm_hdr: db '<header><a href="/">geektaco</a><span class=g> / admin</span></header>', 0
+; Stats sit between the header and the invites table. The uncommitted count is
+; the one diagnostic number here: nonzero means a worker died mid-write.
+s_st_a:   db '<table class=s>', 0
+s_st_r:   db '<tr><td>', 0
+s_st_v:   db '</td><td class=n>', 0
+s_st_e:   db '</td></tr>', 0
+s_st_warn: db '</td><td class=w>', 0
+s_st_z:   db '</table>', 0
+s_l_slot: db 'slots', 0
+s_l_live: db 'committed', 0
+s_l_hole: db 'uncommitted', 0
+s_l_del:  db 'deleted', 0
+s_l_root: db 'threads', 0
+s_l_rep:  db 'replies', 0
+s_l_inv:  db 'invites', 0
+s_l_free: db 'unused', 0
+s_l_uses: db 'redeemed', 0
+s_l_rev:  db 'revoked', 0
+s_adm_top: db '<h1>invites</h1>'
            db '<form method=post action=/admin/inv>'
            db '<input type=submit value="create invite"></form>'
            db '<table>', 0
@@ -382,6 +416,96 @@ emit_post:
         ret
 
 ; ---------------------------------------------------------------------------
+; emit_nav(rdi=page, rsi=more flag, rdx=prefix z-string, rcx=thread index)
+; Emits "newer . page N . older", omitting whichever link does not exist.
+; rdx is "/p/" for the index or "/t/" for a thread; when it is "/t/" the
+; thread index in rcx is emitted before the page segment. Page 0 canonicalises
+; to "/" or "/t/<n>" so the first page never has two URLs.
+; clobbers: caller-saved regs; preserves rbx, r12-r15.
+emit_nav:
+        push    rbx
+        push    r12
+        push    r13
+        push    r14
+        push    r15
+        mov     r12, rdi                ; page
+        mov     r13, rsi                ; more?
+        mov     r14, rdx                ; prefix
+        mov     r15, rcx                ; thread index (only for "/t/")
+        test    r12, r12
+        jnz     .has_newer
+        test    r13, r13
+        jz      .none                   ; single page: no nav at all
+.has_newer:
+        mov     edi, s_nv_a
+        call    ob_puts
+        test    r12, r12
+        jz      .page_no                ; page 0 has nothing newer
+        mov     edi, s_nv_nw          ; <a href="
+        call    ob_puts
+        lea     rdi, [r12 - 1]
+        call    .href
+        mov     edi, s_nv_nwt         ; ">newer</a>
+        call    ob_puts
+.page_no:
+        mov     edi, s_nv_pg
+        call    ob_puts
+        lea     rdi, [r12 + 1]          ; 1-based for a human reader
+        call    ob_putu
+        mov     edi, s_nv_pge
+        call    ob_puts
+        test    r13, r13
+        jz      .close
+        mov     edi, s_nv_nw
+        call    ob_puts
+        lea     rdi, [r12 + 1]
+        call    .href
+        mov     edi, s_nv_odt         ; ">older</a>
+        call    ob_puts
+.close:
+        mov     edi, s_nv_end
+        call    ob_puts
+.none:
+        pop     r15
+        pop     r14
+        pop     r13
+        pop     r12
+        pop     rbx
+        ret
+
+; .href(rdi=target page) -- writes the URL for that page using r14/r15.
+.href:
+        push    rbp
+        mov     rbp, rdi                ; target page
+        cmp     r14d, s_pfx_t
+        jne     .h_index
+        mov     edi, s_pfx_t          ; /t/
+        call    ob_puts
+        mov     rdi, r15
+        call    ob_putu                 ; /t/<root>
+        test    rbp, rbp
+        jz      .h_done                 ; page 0 is bare /t/<root>
+        mov     edi, s_slash
+        call    ob_puts
+        mov     rdi, rbp
+        call    ob_putu
+        jmp     .h_done
+.h_index:
+        test    rbp, rbp
+        jnz     .h_num
+        mov     edi, s_slash          ; page 0 is bare /
+        call    ob_puts
+        jmp     .h_done
+.h_num:
+        mov     edi, s_pfx_p          ; /p/<n>
+        call    ob_puts
+        mov     rdi, rbp
+        call    ob_putu
+.h_done:
+        pop     rbp
+        ret
+
+; ---------------------------------------------------------------------------
 ; render_index() -- 200 page listing every thread root, newest first.
 ; A record is a root iff R_PARENT == its own index. Reply counts come from a
 ; second pass counting R_PARENT == root index (the root itself excluded).
@@ -394,6 +518,10 @@ render_index:
         push    r14
         push    r15
         mov     rbx, [fs:TLS_SELF]
+        ; Scratch holds the page number and the "a further page exists" flag:
+        ; every register is already spoken for by the scan.
+        mov     [rbx + TLS_PAGE], rdi   ; requested page
+        mov     qword [rbx + TLS_MORE], 0
         mov     qword [rbx + TLS_OBLEN], 0
         mov     edi, s_200
         call    ob_puts
@@ -407,6 +535,8 @@ render_index:
         test    r12, r12
         jz      .empty
         mov     r13, r12                ; i runs r12-1 .. 0: newest first
+        xor     r14d, r14d              ; matching roots seen so far
+        xor     r15d, r15d              ; roots emitted on this page
 .outer:
         dec     r13
         mov     rdi, r13
@@ -420,10 +550,13 @@ render_index:
         mov     rbp, rax                ; direct root pointer survives inner scan
         cmp     dword [rbp + R_PARENT], r13d ; root iff parent == own index
         jne     .next
-        ; Reply count is read straight from R_NREPLY, which the replier bumps
-        ; with a lock inc. The old second pass over every record made this page
-        ; O(n^2); at 65536 records that is 4 billion iterations per request.
-        mov     r15d, [rbp + R_NREPLY]
+        ; Skip by MATCHES, never by raw index: deleting one thread would
+        ; otherwise shift every later page and drop a row at each boundary.
+        mov     rax, [rbx + TLS_PAGE]
+        imul    rax, rax, PAGE_SIZE_N
+        inc     r14
+        cmp     r14, rax
+        jbe     .next                   ; still ahead of this page's first row
         mov     edi, s_th_a           ; <div class=t><a href="/t/
         call    ob_puts
         mov     rdi, r13
@@ -446,10 +579,17 @@ render_index:
         call    ef_a                    ; escaped author
         mov     edi, s_dot            ; middle dot
         call    ob_puts
-        mov     rdi, r15
-        call    ob_putu                 ; reply count
+        mov     edi, [rbp + R_NREPLY]   ; denormalised count: no rescan
+        call    ob_putu
         mov     edi, s_th_e           ; replies</div></div>
         call    ob_puts
+        inc     r15
+        cmp     r15, PAGE_SIZE_N
+        jb      .next
+        ; Stop the moment the page is full. Walking on to record 0 and
+        ; discarding would make page 0 O(n) again, which is the whole point.
+        mov     qword [rbx + TLS_MORE], 1  ; more rows exist: show "older"
+        jmp     .form
 .next:
         test    r13, r13
         jnz     .outer                  ; stop after index 0 was processed
@@ -458,6 +598,11 @@ render_index:
         mov     edi, s_empty
         call    ob_puts
 .form:
+        mov     rdi, [rbx + TLS_PAGE]
+        mov     rsi, [rbx + TLS_MORE]
+        mov     edx, s_pfx_p
+        xor     ecx, ecx
+        call    emit_nav
         mov     edi, s_nav
         call    ob_puts
         mov     edi, s_newform
@@ -484,10 +629,14 @@ render_index:
 ; clobbers: caller-saved regs; preserves rbx, r12-r15.
 render_thread:
         push    rbx
+        push    rbp
         push    r12
         push    r13
         push    r14
+        push    r15
         mov     rbx, [fs:TLS_SELF]
+        mov     [rbx + TLS_PAGE], rsi   ; requested reply page
+        mov     qword [rbx + TLS_MORE], 0
         mov     r12, rdi                ; root index
         mov     rdi, r12
         call    db_rec
@@ -521,6 +670,8 @@ render_thread:
         call    db_count
         mov     r14, rax
         xor     r13d, r13d              ; j
+        xor     ebp, ebp                ; matching replies seen
+        xor     r15d, r15d              ; replies emitted on this page
 .rep:
         cmp     r13, r12
         je      .rnext                  ; skip the root itself
@@ -534,13 +685,29 @@ render_thread:
         jnz     .rnext                  ; deleted replies vanish from the thread
         cmp     dword [rax + R_PARENT], r12d
         jne     .rnext
+        ; Skip by MATCHES, not by index, for the same reason as the index page.
+        mov     rdx, [rbx + TLS_PAGE]
+        imul    rdx, rdx, PAGE_SIZE_N
+        inc     rbp
+        cmp     rbp, rdx
+        jbe     .rnext
         mov     rdi, rax
         call    emit_post
+        inc     r15
+        cmp     r15, PAGE_SIZE_N
+        jb      .rnext
+        mov     qword [rbx + TLS_MORE], 1  ; more replies exist
+        jmp     .repdone
 .rnext:
         inc     r13
         cmp     r13, r14
         jb      .rep
 .repdone:
+        mov     rdi, [rbx + TLS_PAGE]
+        mov     rsi, [rbx + TLS_MORE]
+        mov     edx, s_pfx_t
+        mov     rcx, r12                ; thread index for the URL
+        call    emit_nav
         mov     edi, s_repl_a         ; form + hidden p=
         call    ob_puts
         mov     rdi, r12
@@ -552,15 +719,13 @@ render_thread:
         mov     edi, s_f_b
         call    ob_puts
         mov     edi, s_repl_b
-        pop     r14
-        pop     r13
-        pop     r12
-        pop     rbx
-        jmp     ob_puts
+        call    ob_puts
 .out:
+        pop     r15
         pop     r14
         pop     r13
         pop     r12
+        pop     rbp
         pop     rbx
         ret
 .notfound:
@@ -694,6 +859,174 @@ render_head_cookie:
         jmp     ob_puts
 
 ; ---------------------------------------------------------------------------
+; emit_stats() -- summary table above the admin panel's two lists.
+; One pass per mapping; db_rec is called once per index, never twice.
+; Counters live in TLS_SCRATCH because there are more of them than there are
+; free callee-saved registers, and a .bss array would be shared by 4 threads.
+;   scratch qword 0..5  slots, committed, holes, deleted, roots, replies
+;   scratch qword 6..9  invites, unused, redeemed, revoked
+; clobbers: caller-saved regs; preserves rbx, rbp, r12-r15.
+emit_stats:
+        push    rbx
+        push    rbp
+        push    r12
+        push    r13
+        push    r14
+        mov     rbx, [fs:TLS_SELF]
+        mov     r14, [rbx + TLS_SCRATCH]
+        xor     eax, eax
+        mov     ecx, 10
+        mov     rdi, r14
+        rep     stosq                   ; zero all ten counters
+
+        call    db_count
+        mov     r12, rax
+        mov     [r14], rax              ; slots = the cursor itself
+        xor     r13d, r13d
+.post:
+        cmp     r13, r12
+        jae     .posts_done
+        mov     rdi, r13
+        call    db_rec
+        test    rax, rax
+        jz      .posts_done             ; null means past the cursor: stop
+        mov     rbp, rax
+        cmp     dword [rbp + R_TIME], 0
+        jne     .committed
+        inc     qword [r14 + 16]        ; uncommitted hole
+        jmp     .post_next
+.committed:
+        inc     qword [r14 + 8]
+        test    byte [rbp + R_FLAGS], FLAG_DELETED
+        jz      .not_del
+        inc     qword [r14 + 24]
+        jmp     .post_next              ; deleted rows are not counted as live
+.not_del:
+        cmp     dword [rbp + R_PARENT], r13d
+        jne     .is_reply
+        inc     qword [r14 + 32]        ; root
+        jmp     .post_next
+.is_reply:
+        inc     qword [r14 + 40]
+.post_next:
+        inc     r13
+        jmp     .post
+.posts_done:
+
+        call    inv_count
+        mov     r12, rax
+        xor     r13d, r13d
+.inv:
+        cmp     r13, r12
+        jae     .inv_done
+        mov     rdi, r13
+        call    inv_rec
+        test    rax, rax
+        jz      .inv_done
+        mov     rbp, rax
+        cmp     dword [rbp + I_TIME], 0
+        je      .inv_next               ; reserved, no code written yet
+        inc     qword [r14 + 48]
+        test    byte [rbp + I_FLAGS], INV_FLAG_REVOKED
+        jz      .inv_live
+        inc     qword [r14 + 72]
+        jmp     .inv_next
+.inv_live:
+        cmp     dword [rbp + I_USED], 0
+        jne     .inv_used
+        inc     qword [r14 + 56]
+        jmp     .inv_next
+.inv_used:
+        inc     qword [r14 + 64]
+.inv_next:
+        inc     r13
+        jmp     .inv
+.inv_done:
+
+        mov     edi, s_st_a
+        call    ob_puts
+        mov     edi, s_l_slot
+        mov     rsi, [r14]
+        call    .row
+        mov     edi, s_l_live
+        mov     rsi, [r14 + 8]
+        call    .row
+        ; The only number that signals a fault, so it is the only one that
+        ; changes colour -- and only when it is actually nonzero.
+        mov     edi, s_l_hole
+        mov     rsi, [r14 + 16]
+        test    rsi, rsi
+        jz      .hole_ok
+        call    .row_warn
+        jmp     .rest
+.hole_ok:
+        call    .row
+.rest:
+        mov     edi, s_l_del
+        mov     rsi, [r14 + 24]
+        call    .row
+        mov     edi, s_l_root
+        mov     rsi, [r14 + 32]
+        call    .row
+        mov     edi, s_l_rep
+        mov     rsi, [r14 + 40]
+        call    .row
+        mov     edi, s_l_inv
+        mov     rsi, [r14 + 48]
+        call    .row
+        mov     edi, s_l_free
+        mov     rsi, [r14 + 56]
+        call    .row
+        mov     edi, s_l_uses
+        mov     rsi, [r14 + 64]
+        call    .row
+        mov     edi, s_l_rev
+        mov     rsi, [r14 + 72]
+        call    .row
+        mov     edi, s_st_z
+        call    ob_puts
+        pop     r14
+        pop     r13
+        pop     r12
+        pop     rbp
+        pop     rbx
+        ret
+
+; .row(rdi=label z-string, rsi=value) -- one label/value pair.
+.row:
+        push    r15
+        mov     r15, rsi
+        push    rdi
+        mov     edi, s_st_r
+        call    ob_puts
+        pop     rdi
+        call    ob_puts
+        mov     edi, s_st_v
+        call    ob_puts
+        mov     rdi, r15
+        call    ob_putu
+        mov     edi, s_st_e
+        call    ob_puts
+        pop     r15
+        ret
+.row_warn:
+        push    r15
+        mov     r15, rsi
+        push    rdi
+        mov     edi, s_st_r
+        call    ob_puts
+        pop     rdi
+        call    ob_puts
+        mov     edi, s_st_warn
+        call    ob_puts
+        mov     rdi, r15
+        call    ob_putu
+        mov     edi, s_st_e
+        call    ob_puts
+        pop     r15
+        ret
+
+; ---------------------------------------------------------------------------
 ; render_admin() -- operator panel.
 ; Unlike the public pages this deliberately SHOWS uncommitted and deleted
 ; records: hiding them is exactly what an operator must not have done for him.
@@ -712,6 +1045,9 @@ render_admin:
         mov     edi, s_hdr
         call    ob_puts
         call    emit_head
+        mov     edi, s_adm_hdr
+        call    ob_puts
+        call    emit_stats
         mov     edi, s_adm_top
         call    ob_puts
 

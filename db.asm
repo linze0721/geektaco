@@ -18,6 +18,9 @@ inv_base: resq 1
 ; value and reads only tv_sec, so the race is benign. Intentionally not TLS.
 ; Both mapping pointers and this 16-byte timespec are 8-byte aligned.
 db_timespec: resq 2
+; Commit counter for the periodic flush. Bumped with `lock xadd` because all
+; four workers commit concurrently; a plain inc would miss boundaries.
+sync_ctr: resd 1
 
 section .text
 
@@ -216,8 +219,29 @@ record_commit:
     ; correctly ordered against preceding body writes. R_TIME (or I_TIME)
     ; must be the textually last store to the record: this publishes it.
     mov [r8], eax
-    xor eax, eax
     pop rdx
+    ; Bound how much a power cut can lose. MAP_SHARED pages already survive
+    ; process death, so this is only about the machine losing power.
+    ; The counter must be atomic: four workers commit concurrently, and a
+    ; plain inc would let two threads both see the boundary, or neither.
+    mov eax, 1
+    lock xadd [sync_ctr], eax       ; returns the PRE-increment value
+    inc eax                         ; so test the count, not the old index:
+    and eax, SYNC_EVERY - 1         ; otherwise commit #1 flushes a clean map
+    jnz .done
+    ; MS_ASYNC, not MS_SYNC: MS_SYNC blocks this worker until writeback
+    ; finishes, stalling a quarter of the server on every 32nd post.
+    ; Full range: the file is sparse, so the kernel walks its own dirty list
+    ; and passing DB_BYTES avoids error-prone page-alignment arithmetic.
+    mov rdi, [db_base]
+    mov esi, DB_BYTES
+    mov edx, MS_ASYNC
+    mov eax, SYS_msync
+    syscall                         ; return ignored: the record is already
+                                    ; published and visible; a failed flush
+                                    ; must not fail the commit.
+.done:
+    xor eax, eax
     ret
 .invalid:
     pop rdx

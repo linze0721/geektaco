@@ -47,6 +47,12 @@ TLS_CLEN        equ 88          ; dq  declared Content-Length
 ; Session state for the current request, resolved once per connection.
 TLS_INVITE      equ 96          ; dq  invite slot from the cookie, or -1
 TLS_ADMIN       equ 104         ; dq  1 if the admin cookie checked out
+
+; Pagination state for the page being rendered. These need their own slots:
+; TLS_SCRATCH is reused by cookie extraction, form fields and redirect
+; construction, so a page builder cannot keep anything there across a call.
+TLS_PAGE        equ 112         ; dq  requested page number
+TLS_MORE        equ 120         ; dq  1 when a further page exists
 TLS_SIZE        equ 128
 
 SCRATCH_SIZE    equ 256
@@ -120,6 +126,20 @@ REQ_SIZE        equ 16384
 M_GET           equ 0
 M_POST          equ 1
 M_OTHER         equ 2
+
+; ---- pagination -----------------------------------------------------------
+; Threads per index page and replies per thread page. The index walks newest
+; first, so page 0 is always the cheapest request -- it stops after PAGE_SIZE_N
+; matches instead of scanning to record 0.
+PAGE_SIZE_N     equ 25
+
+; ---- durability -----------------------------------------------------------
+; MS_ASYNC queues writeback without blocking the worker; the kernel already
+; guarantees the mapping is coherent for readers, so this only bounds how long
+; a power cut can lose. Every SYNC_EVERY commits one worker issues an async
+; flush, so the loss window is bounded by writes, not by time.
+SYNC_EVERY      equ 32
+MS_ASYNC        equ 1
 
 ; ---- net ------------------------------------------------------------------
 PORT_BE         equ 0x901F      ; htons(8080)
