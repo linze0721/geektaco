@@ -53,7 +53,10 @@ TLS_ADMIN       equ 104         ; dq  1 if the admin cookie checked out
 ; construction, so a page builder cannot keep anything there across a call.
 TLS_PAGE        equ 112         ; dq  requested page number
 TLS_MORE        equ 120         ; dq  1 when a further page exists
-TLS_SIZE        equ 128
+
+; Logged-in user for this request, resolved once from the session cookie.
+TLS_USER        equ 128         ; dq  user index, or -1 when signed out
+TLS_SIZE        equ 160
 
 SCRATCH_SIZE    equ 256
 
@@ -68,7 +71,8 @@ REC_SHIFT       equ 9
 R_PARENT        equ 0           ; dd  root index if == own index, else root
 R_TIME          equ 4           ; dd  unix epoch seconds; 0 => not committed
 R_FLAGS         equ 8           ; dd  bit0 = deleted
-R_INVITE        equ 12          ; dd  invite slot that authored this (audit)
+R_USER          equ 12          ; dd  user index that authored this
+R_INVITE        equ 12          ; dd  legacy alias; identical field
 R_NREPLY        equ 16          ; dd  replies to this root; `lock inc`d by the
                                 ;     replier so the index page never rescans.
                                 ;     Meaningful on roots only.
@@ -99,6 +103,54 @@ I_PAD           equ 28          ; dd
 INV_FLAG_REVOKED equ 1
 CODE_LEN        equ 16          ; hex chars in an invite code
 MAX_INVITES     equ 4096
+
+; ---- user record (128 bytes) ----------------------------------------------
+; An invite is now a one-shot ticket to CREATE an account; the account is the
+; durable identity. Sessions are stateless: the cookie carries the user index
+; plus an HMAC over it keyed by a per-boot secret, so there is no session
+; table and a restart invalidates every cookie.
+USR_SIZE        equ 128
+USR_SHIFT       equ 7
+
+U_TIME          equ 0           ; dd  created; 0 => reserved, not committed
+U_FLAGS         equ 4           ; dd  bit0 = banned
+U_INVITE        equ 8           ; dd  invite slot that created this account
+U_POSTS         equ 12          ; dd  posts authored; lock inc'd
+U_NAME          equ 16          ; 24 bytes, NUL padded, lowercase
+U_SALT          equ 40          ; 16 raw bytes
+U_HASH          equ 56          ; 32 bytes: SHA-256(salt || password)
+U_PAD           equ 88          ; 40 bytes reserved
+
+USR_FLAG_BANNED equ 1
+NAME_MAX        equ 24
+PASS_MIN        equ 8           ; refuse anything shorter
+PASS_MAX        equ 64
+SALT_LEN        equ 16
+HASH_LEN        equ 32
+MAX_USERS       equ 4096
+USR_MAGIC       equ 0x3152535554454547   ; "GEETUSR1"
+USR_BYTES       equ (MAX_USERS + 1) * USR_SIZE
+
+; ---- session cookie -------------------------------------------------------
+; Value is "<index-hex8><mac-hex16>": the user index and a truncated HMAC
+; over it. Unforgeable without the secret, and self-expiring across restarts
+; because the secret is regenerated at startup.
+SESS_IDXLEN     equ 8           ; hex chars of user index
+SESS_MACLEN     equ 16          ; hex chars of truncated MAC
+SESS_LEN        equ 24          ; total cookie value length
+SECRET_LEN      equ 32          ; raw bytes of per-boot session secret
+
+; ---- AF_ALG (kernel crypto socket) ----------------------------------------
+; Hashing via the kernel rather than a hand-rolled SHA-256: smaller, and it
+; keeps a security primitive out of code that would otherwise need auditing.
+AF_ALG          equ 38
+SOCK_SEQPACKET  equ 5
+SOL_ALG         equ 279
+ALG_SET_KEY     equ 1
+SYS_accept4     equ 288
+SYS_sendto      equ 44
+SYS_recvfrom    equ 45
+MSG_MORE        equ 0x8000
 
 ; ---- file headers ---------------------------------------------------------
 ; Slot 0 of each file is a header, so payload record i lives at (i+1)*size.

@@ -98,6 +98,17 @@ C -o /dev/null -X POST -b "gt=$CODE" "$U/new" \
 R=$(C "$U/t/4")
 hasnt "<script>alert" "$R" "raw <script> reached output (XSS!)"
 has "&lt;script&gt;" "$R" "script tag not escaped"
+# Markdown: the scheme allowlist is the only thing making links safe, and
+# escape-before-markup is the only thing making the rest safe.
+C -o /dev/null -X POST -b "gt=$CODE" "$U/new" \
+  --data-urlencode 't=md' \
+  --data-urlencode 'b=**b** `c` [ok](https://e.com) [no](javascript:alert(1))'
+R=$(C "$U/t/5")
+has "<strong>b</strong>" "$R" "markdown bold not rendered"
+has "<code>c</code>" "$R" "markdown code not rendered"
+has 'href="https://e.com"' "$R" "safe link not rendered"
+echo "$R" | grep -qiE 'href="[^"]*javascript:' && fail "javascript: reached an href (XSS!)"
+has "[no](javascript:" "$R" "rejected link should render literally"
 
 echo "== 13. admin delete hides a post =="
 C -o /dev/null -X POST -b "ga=$KEY" "$U/admin/del" --data-urlencode 'i=4'

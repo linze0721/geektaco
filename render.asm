@@ -426,6 +426,453 @@ ob_putdate:
         jmp     ob_putu
 
 ; ---------------------------------------------------------------------------
+; Markdown rendering for post bodies.
+;
+; ORDER IS THE WHOLE SECURITY ARGUMENT: every byte of user text reaches the
+; page through ob_put_esc, and the only unescaped bytes are the literal tags
+; this code emits itself. Parsing first and escaping afterwards is the classic
+; markdown XSS -- you either escape your own tags into visible text, or you
+; exempt them and hand the user a hole.
+;
+; Second rule, specific to this codebase: ob_puts expands dictionary tokens
+; and is fed literals only. User bytes go to ob_put_esc, never ob_puts.
+;
+; Subset: fenced code, blockquote, unordered list, paragraphs; inline code,
+; **strong**, *em*, and [text](url) with an http/https// scheme allowlist.
+; Unmatched markers render literally. No headings, images, tables, or HTML.
+
+; md_inline(rdi=ptr, rsi=len) -- inline pass over one already-block-classified
+; run of text. clobbers caller-saved; preserves rbx, rbp, r12-r15.
+md_inline:
+        push    rbx
+        push    rbp
+        push    r12
+        push    r13
+        push    r14
+        mov     rbx, rdi                ; base
+        mov     r12, rsi                ; length
+        xor     r13d, r13d              ; cursor
+.loop:
+        cmp     r13, r12
+        jae     .done
+        movzx   eax, byte [rbx + r13]
+        cmp     al, '`'
+        je      .code
+        cmp     al, '*'
+        je      .star
+        cmp     al, '['
+        je      .link
+.lit:
+        ; ordinary byte: emit escaped, one at a time so the scanner stays simple
+        lea     rdi, [rbx + r13]
+        push    1
+        pop     rsi
+        call    ob_put_esc
+        inc     r13
+        jmp     .loop
+
+        ; ---- `code` --------------------------------------------------------
+.code:
+        lea     rbp, [r13 + 1]
+        mov     r14, rbp
+.code_scan:
+        cmp     r14, r12
+        jae     .lit                    ; unmatched backtick: literal
+        cmp     byte [rbx + r14], '`'
+        je      .code_hit
+        inc     r14
+        jmp     .code_scan
+.code_hit:
+        mov     edi, s_md_cd
+        call    ob_puts
+        lea     rdi, [rbx + rbp]
+        mov     rsi, r14
+        sub     rsi, rbp
+        call    ob_put_esc              ; no inline processing inside code
+        mov     edi, s_md_cde
+        call    ob_puts
+        lea     r13, [r14 + 1]
+        jmp     .loop
+
+        ; ---- **strong** and *em* -------------------------------------------
+.star:
+        lea     rbp, [r13 + 1]
+        cmp     rbp, r12
+        jae     .lit
+        cmp     byte [rbx + rbp], '*'
+        jne     .em
+        ; strong: find a closing "**"
+        inc     rbp                     ; content start
+        mov     r14, rbp
+.st_scan:
+        lea     rax, [r14 + 1]
+        cmp     rax, r12
+        jae     .lit
+        cmp     byte [rbx + r14], '*'
+        jne     .st_next
+        cmp     byte [rbx + rax], '*'
+        je      .st_hit
+.st_next:
+        inc     r14
+        jmp     .st_scan
+.st_hit:
+        mov     edi, s_md_st
+        call    ob_puts
+        lea     rdi, [rbx + rbp]
+        mov     rsi, r14
+        sub     rsi, rbp
+        call    md_inline               ; nested inline inside strong
+        mov     edi, s_md_ste
+        call    ob_puts
+        lea     r13, [r14 + 2]
+        jmp     .loop
+.em:
+        mov     r14, rbp
+.em_scan:
+        cmp     r14, r12
+        jae     .lit
+        cmp     byte [rbx + r14], '*'
+        je      .em_hit
+        inc     r14
+        jmp     .em_scan
+.em_hit:
+        cmp     r14, rbp
+        je      .lit                    ; "**" with nothing between: literal
+        mov     edi, s_md_em
+        call    ob_puts
+        lea     rdi, [rbx + rbp]
+        mov     rsi, r14
+        sub     rsi, rbp
+        call    md_inline
+        mov     edi, s_md_eme
+        call    ob_puts
+        lea     r13, [r14 + 1]
+        jmp     .loop
+
+        ; ---- [text](url) ---------------------------------------------------
+.link:
+        lea     rbp, [r13 + 1]          ; text start
+        mov     r14, rbp
+.lk_text:
+        cmp     r14, r12
+        jae     .lit
+        cmp     byte [rbx + r14], ']'
+        je      .lk_close
+        inc     r14
+        jmp     .lk_text
+.lk_close:
+        lea     rax, [r14 + 1]
+        cmp     rax, r12
+        jae     .lit
+        cmp     byte [rbx + rax], '('
+        jne     .lit
+        ; r14 = ']' index, url starts at r14+2
+        lea     rdx, [r14 + 2]
+        mov     r8, rdx                 ; url start
+.lk_url:
+        cmp     rdx, r12
+        jae     .lit
+        cmp     byte [rbx + rdx], ')'
+        je      .lk_have
+        inc     rdx
+        jmp     .lk_url
+.lk_have:
+        ; rdx = ')' index. Scheme allowlist: http://, https://, or leading '/'.
+        ; Anything else -- javascript:, data:, vbscript: -- renders as plain
+        ; text. This check is the entire reason links are safe to support.
+        push    rdx
+        push    r8
+        mov     rdi, rbx
+        add     rdi, r8
+        mov     rsi, rdx
+        sub     rsi, r8
+        call    md_url_ok
+        pop     r8
+        pop     rdx
+        test    eax, eax
+        jz      .lit                    ; rejected: fall through to literal
+        ; rdx (the ')' index) and r8 (url start) are caller-saved and every
+        ; emit below clobbers them, so park the resume position in a
+        ; callee-saved register before emitting anything.
+        push    r12
+        lea     r12, [rdx + 1]          ; resume just past ')'
+        push    r8
+        push    rdx
+        mov     edi, s_md_a1
+        call    ob_puts
+        pop     rdx
+        pop     r8
+        lea     rdi, [rbx + r8]
+        mov     rsi, rdx
+        sub     rsi, r8
+        call    ob_put_esc              ; url escaped too: quotes cannot break out
+        mov     edi, s_md_a2
+        call    ob_puts
+        lea     rdi, [rbx + rbp]
+        mov     rsi, r14
+        sub     rsi, rbp
+        call    ob_put_esc              ; link text: escaped, no nested markup
+        mov     edi, s_md_a3
+        call    ob_puts
+        mov     r13, r12
+        pop     r12
+        jmp     .loop
+.done:
+        pop     r14
+        pop     r13
+        pop     r12
+        pop     rbp
+        pop     rbx
+        ret
+
+; md_url_ok(rdi=ptr, rsi=len) -> eax = 1 if the URL may be linked.
+; Allowlist only: "/" prefix, "http://", "https://". Everything else is
+; rejected, which is what keeps javascript: and data: out of href.
+md_url_ok:
+        test    rsi, rsi
+        jz      .no
+        cmp     byte [rdi], '/'
+        je      .yes
+        cmp     rsi, 7
+        jb      .no
+        mov     eax, [rdi]
+        or      eax, 0x20202020         ; fold case
+        cmp     eax, 'http'
+        jne     .no
+        ; "http" matched. Accept "http://" or "https://" -- compare the
+        ; separator bytes individually rather than as a dword, so a 7-byte
+        ; URL cannot be matched by reading an 8th byte past its end.
+        cmp     byte [rdi + 4], ':'
+        je      .sep
+        cmp     byte [rdi + 4], 's'
+        jne     .no
+        cmp     rsi, 8
+        jb      .no
+        inc     rdi                     ; skip the 's', then expect "://"
+        cmp     byte [rdi + 4], ':'
+        jne     .no
+.sep:
+        cmp     byte [rdi + 5], '/'
+        jne     .no
+        cmp     byte [rdi + 6], '/'
+        jne     .no
+.yes:
+        mov     eax, 1
+        ret
+.no:
+        xor     eax, eax
+        ret
+
+; ob_put_md(rdi=ptr, rsi=capacity) -- block pass over a NUL-padded body.
+; Walks line by line: ``` fences a code block (verbatim, escaped, no inline),
+; "> " is a blockquote, "- "/"* " builds a list, everything else accumulates
+; into a paragraph. clobbers caller-saved; preserves rbx, rbp, r12-r15.
+ob_put_md:
+        push    rbx
+        push    rbp
+        push    r12
+        push    r13
+        push    r14
+        push    r15
+        mov     rbx, rdi                ; base
+        ; logical length: up to the first NUL or the capacity
+        xor     r12d, r12d
+.len:
+        cmp     r12, rsi
+        jae     .len_done
+        cmp     byte [rbx + r12], 0
+        je      .len_done
+        inc     r12
+        jmp     .len
+.len_done:
+        xor     r13d, r13d              ; cursor
+        xor     r14d, r14d              ; 1 while inside <ul>
+        xor     r15d, r15d              ; 1 while inside a paragraph
+
+.line:
+        cmp     r13, r12
+        jae     .finish
+        ; rbp = end of this line (index of \n, or r12)
+        mov     rbp, r13
+.eol:
+        cmp     rbp, r12
+        jae     .eol_done
+        cmp     byte [rbx + rbp], 10
+        je      .eol_done
+        inc     rbp
+        jmp     .eol
+.eol_done:
+        mov     rax, rbp
+        sub     rax, r13                ; line length
+        ; strip a trailing CR so CRLF bodies behave
+        test    rax, rax
+        jz      .have
+        mov     rcx, rbp
+        dec     rcx
+        cmp     byte [rbx + rcx], 13
+        jne     .have
+        dec     rax
+.have:
+        mov     rcx, rax                ; rcx = line length (no CR)
+        ; ---- fence?
+        cmp     rcx, 3
+        jb      .not_fence
+        cmp     word [rbx + r13], '``'
+        jne     .not_fence
+        cmp     byte [rbx + r13 + 2], '`'
+        jne     .not_fence
+        call    .close_open
+        mov     edi, s_md_pre
+        call    ob_puts
+        ; body runs from the line after the fence to a closing fence
+        lea     r13, [rbp + 1]
+.fence_line:
+        cmp     r13, r12
+        jae     .fence_done
+        mov     rbp, r13
+.f_eol:
+        cmp     rbp, r12
+        jae     .f_eol_done
+        cmp     byte [rbx + rbp], 10
+        je      .f_eol_done
+        inc     rbp
+        jmp     .f_eol
+.f_eol_done:
+        mov     rax, rbp
+        sub     rax, r13
+        cmp     rax, 3
+        jb      .f_emit
+        cmp     word [rbx + r13], '``'
+        jne     .f_emit
+        cmp     byte [rbx + r13 + 2], '`'
+        je      .fence_close
+.f_emit:
+        lea     rdi, [rbx + r13]
+        mov     rsi, rax
+        call    ob_put_esc              ; verbatim, no inline pass
+        push    10
+        pop     rdi
+        call    ob_putc
+        lea     r13, [rbp + 1]
+        jmp     .fence_line
+.fence_close:
+        lea     r13, [rbp + 1]
+.fence_done:
+        mov     edi, s_md_pree
+        call    ob_puts
+        jmp     .line
+.not_fence:
+        ; ---- blank line ends a paragraph and a list
+        test    rcx, rcx
+        jnz     .not_blank
+        call    .close_open
+        lea     r13, [rbp + 1]
+        jmp     .line
+.not_blank:
+        ; ---- "> " blockquote
+        cmp     rcx, 2
+        jb      .not_quote
+        cmp     byte [rbx + r13], '>'
+        jne     .not_quote
+        cmp     byte [rbx + r13 + 1], ' '
+        jne     .not_quote
+        call    .close_open
+        mov     edi, s_md_bq
+        call    ob_puts
+        lea     rdi, [rbx + r13 + 2]
+        lea     rsi, [rcx - 2]
+        call    md_inline
+        mov     edi, s_md_bqe
+        call    ob_puts
+        lea     r13, [rbp + 1]
+        jmp     .line
+.not_quote:
+        ; ---- "- " or "* " list item
+        cmp     rcx, 2
+        jb      .para
+        cmp     byte [rbx + r13 + 1], ' '
+        jne     .para
+        movzx   eax, byte [rbx + r13]
+        cmp     al, '-'
+        je      .item
+        cmp     al, '*'
+        jne     .para
+.item:
+        test    r15, r15
+        jz      .item_nop
+        mov     edi, s_md_pe            ; a list ends any open paragraph
+        call    ob_puts
+        xor     r15d, r15d
+.item_nop:
+        test    r14, r14
+        jnz     .item_body
+        mov     edi, s_md_ul
+        call    ob_puts
+        mov     r14d, 1
+.item_body:
+        mov     edi, s_md_li
+        call    ob_puts
+        lea     rdi, [rbx + r13 + 2]
+        lea     rsi, [rcx - 2]
+        call    md_inline
+        mov     edi, s_md_lie
+        call    ob_puts
+        lea     r13, [rbp + 1]
+        jmp     .line
+.para:
+        ; ---- paragraph text. A hard newline inside a paragraph is preserved
+        ; as a newline; the stylesheet's pre-wrap keeps it visible, so old
+        ; multi-line posts do not collapse onto one line.
+        test    r14, r14
+        jz      .para_nolist
+        mov     edi, s_md_ule
+        call    ob_puts
+        xor     r14d, r14d
+.para_nolist:
+        test    r15, r15
+        jnz     .para_cont
+        mov     edi, s_md_p
+        call    ob_puts
+        mov     r15d, 1
+        jmp     .para_text
+.para_cont:
+        push    10
+        pop     rdi
+        call    ob_putc                 ; line break within the paragraph
+.para_text:
+        lea     rdi, [rbx + r13]
+        mov     rsi, rcx
+        call    md_inline
+        lea     r13, [rbp + 1]
+        jmp     .line
+
+.finish:
+        call    .close_open
+        pop     r15
+        pop     r14
+        pop     r13
+        pop     r12
+        pop     rbp
+        pop     rbx
+        ret
+
+; close whichever block is open; clobbers only caller-saved regs
+.close_open:
+        test    r15, r15
+        jz      .co_list
+        mov     edi, s_md_pe
+        call    ob_puts
+        xor     r15d, r15d
+.co_list:
+        test    r14, r14
+        jz      .co_done
+        mov     edi, s_md_ule
+        call    ob_puts
+        xor     r14d, r14d
+.co_done:
+        ret
+
+; ---------------------------------------------------------------------------
 ; emit_post(rdi=record) -- one <div class=p> block (meta line + pre body).
 ; Emits s_h1b (h1 close + post div open) then the post body.
 ; clobbers: caller-saved regs; preserves rbx.
@@ -448,7 +895,7 @@ emit_post:
         call    ob_puts
         lea     rdi, [rbx + R_BODY]
         mov     esi, BODY_MAX
-        call    ob_put_esc_z
+        call    ob_put_md
         mov     edi, s_post_d         ; </pre></div>
         call    ob_puts
         pop     rbx
