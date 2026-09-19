@@ -16,7 +16,7 @@ s_th_e	</small>
 s_ul_a	<ul>
 s_ul_b	</ul>
 s_empty	<p class=d>no messages yet.
-s_f_a	<label class=d>name</label><input name=a maxlength=23 required>
+s_f_a	
 s_f_b	<label class=d>message</label><textarea name=b rows=7 maxlength=399 required></textarea>
 s_newform	<h2>$ post</h2><form method=post action=/new>
 s_newform2	<label class=d>subject</label><input name=t maxlength=79 required>
@@ -48,11 +48,19 @@ s_ck_b	=
 s_ck_c	; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000\r\n
 s_403a	HTTP/1.0 403 Forbidden\r\n
 s_joined	<h1>geektaco $ auth</h1><p>ok. <a href="/">..</a>
-s_join_a	<h1>geektaco $ auth</h1><p class=d>invite only. paste your code.
-s_join_err	<p><b>invalid, revoked, or mistyped.</b>
-s_join_b	<form method=post action=/join><label class=d>code</label><input name=c maxlength=16 required autofocus><input type=submit value="[ enter ]"></form><p><a href="/">read without posting</a>
+s_lg_a	<h1>geektaco $ login</h1>
+s_lg_e1	<p><b>wrong name or password.</b>
+s_lg_b	<form method=post action=/login><label class=d>name</label><input name=n maxlength=23 required autofocus><label class=d>password</label><input name=w type=password maxlength=64 required><input type=submit value="[ sign in ]"></form><p class=d>no account? <a href="/register">$ register</a>
+s_rg_a	<h1>geektaco $ register</h1><p class=d>an invite code is required.
+s_rg_b	<form method=post action=/register><label class=d>name</label><input name=n maxlength=23 required autofocus pattern="[a-zA-Z0-9_-]+"><label class=d>password</label><input name=w type=password minlength=8 maxlength=64 required><label class=d>invite code</label><input name=c maxlength=16 required><input type=submit value="[ create ]"></form><p class=d>have an account? <a href="/login">$ login</a>
+s_rg_e2	<p><b>that invite is invalid, used, or revoked.</b>
+s_rg_e3	<p><b>that name is taken.</b>
+s_rg_e4	<p><b>names use a-z, 0-9, _ and - only.</b>
+s_rg_e5	<p><b>password must be at least 8 characters.</b>
+s_lg_out	<form method=post action=/logout style=display:inline><input type=submit value="[ sign out ]"></form>
 s_403body	<h1>geektaco</h1><p>403: posting needs an invite. <a href="/join">get in</a>
-s_nav	<p><a href="/join">$ auth</a>
+s_nav	<p class=d><a href="/login">$ login</a> <a href="/register">$ register</a>
+s_who	<p class=d>signed in as 
 s_adm_hdr	<h1>geektaco $ admin</h1><p><a href="/">..</a>
 s_st_a	<h2>$ stat</h2><table>
 s_st_r	<tr><td>

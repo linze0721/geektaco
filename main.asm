@@ -6,11 +6,12 @@ SIGPIPE          equ 13
 SIG_IGN          equ 1
 
 global _start
-extern db_init, db_reserve, db_rec, db_commit, auth_init
-extern session_resolve, invite_find, invite_create, invite_revoke, invite_consume
+extern db_init, db_reserve, db_rec, db_commit, auth_init, user_init
+extern session_resolve, invite_create, invite_revoke, invite_find
+extern user_create, user_check, usr_rec, session_make
 extern http_parse, parse_uint, form_field
 extern render_index, render_thread, render_404, render_redirect
-extern render_join, render_admin, render_403, render_head_cookie
+extern render_login, render_register, render_admin, render_403, render_head_cookie
 
 section .text
 
@@ -31,6 +32,9 @@ _start:
     test eax, eax
     js .database_error
     call auth_init
+    test rax, rax
+    js .auth_error
+    call user_init
     test eax, eax
     js .auth_error
 
@@ -158,7 +162,7 @@ _start:
 .resolve:
 ; Identity is resolved exactly once per request, after any body is complete so
 ; a split POST cannot be routed on a half-read header block. Handlers and page
-; builders read TLS_INVITE/TLS_ADMIN; nothing else parses a cookie.
+; builders read TLS_USER/TLS_ADMIN; nothing else parses a cookie.
     mov rdi, [rbx + TLS_REQ]
     mov esi, r14d
     call session_resolve
@@ -183,11 +187,11 @@ _start:
 
 .get_page:
     cmp ecx, 4                      ; "/p/" + at least one digit
-    jb .get_join
+    jb .get_login
     cmp word [rdi], '/p'
-    jne .get_join
+    jne .get_login
     cmp byte [rdi + 2], '/'
-    jne .get_join
+    jne .get_login
     add rdi, 3
     lea esi, [rcx - 3]
     call parse_uint
@@ -199,15 +203,28 @@ _start:
 
 ; A non-matching path of the same length MUST fall through, not 404: "/t/60"
 ; is also 5 bytes, and "/t/123" is also 6.
-.get_join:
-    cmp ecx, 5
-    jne .get_admin
-    cmp dword [rdi], '/joi'
-    jne .get_admin
-    cmp byte [rdi + 4], 'n'
-    jne .get_admin
+.get_login:
+    cmp ecx, 6
+    jne .get_register
+    cmp dword [rdi], '/log'
+    jne .get_register
+    cmp word [rdi + 4], 'in'
+    jne .get_register
     xor edi, edi                    ; no error yet
-    call render_join
+    call render_login
+    jmp .respond
+
+.get_register:
+    cmp ecx, 9
+    jne .get_admin
+    cmp dword [rdi], '/reg'
+    jne .get_admin
+    cmp dword [rdi + 4], 'iste'
+    jne .get_admin
+    cmp byte [rdi + 8], 'r'
+    jne .get_admin
+    xor edi, edi
+    call render_register
     jmp .respond
 
 .get_admin:
@@ -272,32 +289,56 @@ _start:
 
 .post:
     cmp ecx, 4
-    jne .post_join
+    jne .post_login
     cmp dword [rdi], '/new'
     jne .not_found
-    cmp qword [rbx + TLS_INVITE], 0
-    jl .forbidden               ; signed: TLS_INVITE is a sign-extended -1.
+    cmp qword [rbx + TLS_USER], 0
+    jl .forbidden               ; signed: TLS_USER is a sign-extended -1.
     jmp .new
 
-.post_join:
-    cmp ecx, 5
+; Same-length paths must fall through to the next candidate, never 404:
+; "/login" and "/reply" are both 6 bytes.
+.post_login:
+    cmp ecx, 6
+    jne .post_logout
+    cmp dword [rdi], '/log'
     jne .post_reply
-    cmp dword [rdi], '/joi'
-    jne .not_found
-    cmp byte [rdi + 4], 'n'
-    jne .not_found
-    jmp .join
+    cmp word [rdi + 4], 'in'
+    jne .post_reply
+    jmp .login
 
 .post_reply:
     cmp ecx, 6
-    jne .post_admin
+    jne .post_logout
     cmp dword [rdi], '/rep'
-    jne .post_admin
+    jne .post_logout
     cmp word [rdi + 4], 'ly'
-    jne .post_admin
-    cmp qword [rbx + TLS_INVITE], 0
-    jl .forbidden               ; signed: TLS_INVITE is a sign-extended -1.
+    jne .post_logout
+    cmp qword [rbx + TLS_USER], 0
+    jl .forbidden               ; signed: TLS_USER is a sign-extended -1.
     jmp .reply
+
+.post_logout:
+    cmp ecx, 7
+    jne .post_register
+    cmp dword [rdi], '/log'
+    jne .post_register
+    cmp word [rdi + 4], 'ou'
+    jne .post_register
+    cmp byte [rdi + 6], 't'
+    jne .post_register
+    jmp .logout
+
+.post_register:
+    cmp ecx, 9
+    jne .post_admin
+    cmp dword [rdi], '/reg'
+    jne .post_admin
+    cmp dword [rdi + 4], 'iste'
+    jne .post_admin
+    cmp byte [rdi + 8], 'r'
+    jne .post_admin
+    jmp .register
 
 .post_admin:
     cmp ecx, 10
@@ -402,33 +443,158 @@ _start:
     call render_redirect
     jmp .respond
 
-; --- POST /join: redeem a code -------------------------------------------
-; Redeeming does NOT consume the invite. Consumption happens on first post, so
-; a code that is handed out but never used stays usable by its recipient.
-.join:
+; --- POST /register ------------------------------------------------------
+; An invite is a one-shot ticket to create an account, spent here rather than
+; at first post: the account is the durable identity from this point on.
+.register:
+    mov edx, key_name
+    mov rcx, [rbx + TLS_SCRATCH]
+    push NAME_MAX - 1
+    pop r8
+    call .field
+    test eax, eax
+    jz .reg_bad_name
+    mov r15d, eax                   ; name length
+    ; password into the record scratch, which is free until a post is built
+    mov edx, key_pass
+    mov rcx, [rbx + TLS_REC]
+    push PASS_MAX
+    pop r8
+    call .field
+    test eax, eax
+    jz .reg_short
+    mov r14d, eax                   ; password length
+    ; invite code into the second half of scratch
     mov edx, key_code
     mov rcx, [rbx + TLS_SCRATCH]
+    add rcx, 64
     push CODE_LEN
     pop r8
     call .field
     cmp eax, CODE_LEN
-    jne .join_bad                   ; wrong length is never a valid code
+    jne .reg_bad_invite
     mov rdi, [rbx + TLS_SCRATCH]
+    add rdi, 64
     push CODE_LEN
     pop rsi
     call invite_find
     test eax, eax
-    js .join_bad
-    mov edi, ck_gt
+    js .reg_bad_invite
+    push rax                        ; invite index; r13 is the client fd
+    ; lowercase the name in place: names are stored and compared lowercased
+    mov rdi, [rbx + TLS_SCRATCH]
+    xor ecx, ecx
+.reg_lower:
+    cmp ecx, r15d
+    jae .reg_go
+    movzx eax, byte [rdi + rcx]
+    cmp al, 'A'
+    jb .reg_lnext
+    cmp al, 'Z'
+    ja .reg_lnext
+    or byte [rdi + rcx], 0x20
+.reg_lnext:
+    inc ecx
+    jmp .reg_lower
+.reg_go:
+    mov rdi, [rbx + TLS_SCRATCH]
+    mov esi, r15d
+    mov rdx, [rbx + TLS_REC]
+    mov ecx, r14d
+    pop r8                          ; invite index back off the stack
+    call user_create
+    test eax, eax
+    js .reg_err
+    jmp .login_ok                   ; account made: hand out a session
+.reg_err:
+    neg eax                         ; -3 taken, -4 malformed, -5 short
+    mov edi, eax
+    call render_register
+    jmp .respond
+.reg_bad_name:
+    push 4
+    pop rdi
+    call render_register
+    jmp .respond
+.reg_short:
+    push 5
+    pop rdi
+    call render_register
+    jmp .respond
+.reg_bad_invite:
+    push 2
+    pop rdi
+    call render_register
+    jmp .respond
+
+; --- POST /login ----------------------------------------------------------
+.login:
+    mov edx, key_name
+    mov rcx, [rbx + TLS_SCRATCH]
+    push NAME_MAX - 1
+    pop r8
+    call .field
+    test eax, eax
+    jz .login_bad
+    mov r15d, eax
+    mov edx, key_pass
+    mov rcx, [rbx + TLS_REC]
+    push PASS_MAX
+    pop r8
+    call .field
+    test eax, eax
+    jz .login_bad
+    mov r14d, eax
+    mov rdi, [rbx + TLS_SCRATCH]
+    xor ecx, ecx
+.login_lower:
+    cmp ecx, r15d
+    jae .login_chk
+    movzx eax, byte [rdi + rcx]
+    cmp al, 'A'
+    jb .login_lnext
+    cmp al, 'Z'
+    ja .login_lnext
+    or byte [rdi + rcx], 0x20
+.login_lnext:
+    inc ecx
+    jmp .login_lower
+.login_chk:
+    mov rdi, [rbx + TLS_SCRATCH]
+    mov esi, r15d
+    mov rdx, [rbx + TLS_REC]
+    mov ecx, r14d
+    call user_check
+    test eax, eax
+    js .login_bad
+.login_ok:
+    ; eax holds the user index; mint a signed cookie for it
+    mov edi, eax
     mov rsi, [rbx + TLS_SCRATCH]
-    push CODE_LEN
+    add rsi, 128
+    call session_make
+    mov edi, ck_gs
+    mov rsi, [rbx + TLS_SCRATCH]
+    add rsi, 128
+    push SESS_LEN
     pop rdx
     call render_head_cookie
     jmp .respond
-.join_bad:
+.login_bad:
     push 1
     pop rdi
-    call render_join
+    call render_login
+    jmp .respond
+
+; --- POST /logout ---------------------------------------------------------
+; Clearing the cookie is enough: the server keeps no session state, so an
+; expired cookie is simply one that no longer verifies.
+.logout:
+    mov edi, ck_gs
+    mov rsi, [rbx + TLS_SCRATCH]
+    mov byte [rsi], 0
+    xor edx, edx                    ; empty value
+    call render_head_cookie
     jmp .respond
 
 ; --- admin actions --------------------------------------------------------
@@ -578,7 +744,7 @@ _start:
     add rax, REQ_SIZE
     mov [rsi + TLS_OBUF], rax
     ; Anonymous mmap zeroes TLS_OBLEN and TLS_ADMIN, along with other fields.
-    mov qword [rsi + TLS_INVITE], -1
+    mov qword [rsi + TLS_USER], -1
     mov edi, ARCH_SET_FS
     mov eax, SYS_arch_prctl
     syscall
@@ -640,16 +806,27 @@ _start:
     push REC_SIZE / 8
     pop rcx
     rep stosq
-    mov edx, key_author
-    mov rcx, [rbx + TLS_REC]
-    add rcx, R_AUTHOR
-    push AUTHOR_MAX - 1
-    pop r8
-    call .field
-    test eax, eax
-    jnz .record_body
-    mov rax, [rbx + TLS_REC]
-    mov dword [rax + R_AUTHOR], 'anon'
+    ; The author is the signed-in account, never a form field: a member must
+    ; not be able to post under someone else's name.
+    push r14
+    mov rdi, [rbx + TLS_USER]
+    call usr_rec
+    pop r14
+    test rax, rax
+    jz .record_body
+    mov rsi, rax
+    add rsi, U_NAME
+    mov rdi, [rbx + TLS_REC]
+    add rdi, R_AUTHOR
+    push AUTHOR_MAX / 8
+    pop rcx
+.cp_author:
+    mov rax, [rsi]
+    mov [rdi], rax
+    add rsi, 8
+    add rdi, 8
+    dec rcx
+    jnz .cp_author
 .record_body:
     mov edx, key_body
     mov rcx, [rbx + TLS_REC]
@@ -670,8 +847,8 @@ _start:
     cmovs edx, eax
     mov [rsi + R_PARENT], edx
     ; Audit trail: which invite authored this record.
-    mov ecx, [rbx + TLS_INVITE]
-    mov [rsi + R_INVITE], ecx
+    mov ecx, [rbx + TLS_USER]
+    mov [rsi + R_USER], ecx
     mov edi, eax
     call db_rec
     mov rdi, rax
@@ -680,9 +857,14 @@ _start:
     rep movsq                      ; Scratch R_TIME is zero: still unpublished.
     ; Claim the invite for its FIRST post only; the cmpxchg inside makes a
     ; later post a no-op. Either outcome is fine -- a member posts many times.
-    mov rdi, [rbx + TLS_INVITE]
-    mov rsi, [rsp]
-    call invite_consume
+    ; The invite was spent at registration; what a post bumps is the
+    ; author's own counter.
+    mov rdi, [rbx + TLS_USER]
+    call usr_rec
+    test rax, rax
+    jz .no_bump
+    lock inc dword [rax + U_POSTS]
+.no_bump:
     pop rdi
     jmp db_commit                  ; Publish: R_TIME is the last store (x86 TSO).
 .append_done:
@@ -734,8 +916,10 @@ key_title: db 't', 0
 key_body: db 'b', 0
 key_parent: db 'p', 0
 key_code:   db 'c', 0
+key_name:   db 'n', 0
+key_pass:   db 'w', 0
 key_index:  db 'i', 0
 admin_path: db '/admin', 0
-ck_gt:      db 'gt', 0
+ck_gs:      db 'gs', 0
 untitled: db '(untitled)'
 untitled_len equ $ - untitled

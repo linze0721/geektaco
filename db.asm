@@ -3,6 +3,7 @@ default rel
 
 global db_init, db_hdr, db_base, db_count, db_rec, db_reserve, db_commit, db_sync
 global inv_hdr, inv_base, inv_count, inv_rec, inv_reserve, inv_commit, now_secs
+global map_file, record_ptr, record_reserve, record_commit
 
 section .rodata
 db_path:  db "geektaco.db", 0

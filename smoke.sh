@@ -28,11 +28,11 @@ N=$(ls /proc/$SRV/task | wc -l)
 echo "== 2. public index is readable without a token =="
 R=$(C -i "$U/")
 has "200 OK" "$R" "index not 200"
-has "/join" "$R" "no link to join page"
+has "/login" "$R" "no link to the login page"
 hasnt "/admin" "$R" "admin panel advertised on a public page"
 
 echo "== 3. posting without an invite is refused =="
-R=$(C -i -X POST "$U/new" --data-urlencode 'a=x' --data-urlencode 't=x' --data-urlencode 'b=x')
+R=$(C -i -X POST "$U/new" --data-urlencode 't=x' --data-urlencode 'b=x')
 has "403" "$R" "POST /new without invite should be 403"
 CUR=$(python3 -c "
 import struct;print(struct.unpack_from('<I',open('geektaco.db','rb').read(),12)[0])")
@@ -55,19 +55,36 @@ print(d[32:48].split(b'\0')[0].decode())")
 [ ${#CODE} = 16 ] || fail "invite code is ${#CODE} chars, want 16"
 echo "  code: $CODE"
 
-echo "== 7. redeem it =="
-R=$(C -i -X POST "$U/join" --data-urlencode "c=$CODE")
+echo "== 7. register with it =="
+R=$(C -i -X POST "$U/register" --data-urlencode 'n=alice' \
+  --data-urlencode 'w=correcthorse' --data-urlencode "c=$CODE")
 has "Set-Cookie" "$R" "join did not set a cookie"
 has "HttpOnly" "$R" "cookie missing HttpOnly"
 has "SameSite=Strict" "$R" "cookie missing SameSite=Strict"
 
 echo "== 8. bogus code is rejected =="
-R=$(C -i -X POST "$U/join" --data-urlencode 'c=0000000000000000')
+R=$(C -i -X POST "$U/register" --data-urlencode 'n=mallory' \
+  --data-urlencode 'w=correcthorse' --data-urlencode 'c=0000000000000000')
 hasnt "Set-Cookie" "$R" "bogus code got a cookie"
 
+# Capture the session cookie the registration handed out.
+SESS=$(C -i -X POST "$U/login" --data-urlencode 'n=alice' \
+  --data-urlencode 'w=correcthorse' | sed -n 's/.*gs=\([0-9a-f]*\).*/\1/p' | head -1)
+[ ${#SESS} = 24 ] || fail "login did not return a 24-char session"
+
+echo "== 8b. wrong password refused =="
+R=$(C -i -X POST "$U/login" --data-urlencode 'n=alice' --data-urlencode 'w=wrongpassword')
+hasnt "Set-Cookie" "$R" "wrong password issued a cookie"
+
+echo "== 8c. a forged cookie is refused =="
+FORGED=$(echo "$SESS" | sed 's/.$/0/; s/^\(.\{23\}\)0$/\10/')
+R=$(C -i -X POST "$U/new" -b "gs=00000000ffffffffffffffff" \
+  --data-urlencode 't=x' --data-urlencode 'b=x')
+has "403" "$R" "forged session was accepted"
+
 echo "== 9. posting as a member =="
-C -o /dev/null -X POST -b "gt=$CODE" "$U/new" \
-  --data-urlencode 'a=member' --data-urlencode 't=hello <world> & "friends"' \
+C -o /dev/null -X POST -b "gs=$SESS" "$U/new" \
+  --data-urlencode 't=hello <world> & "friends"' \
   --data-urlencode 'b=line one
 line two'
 R=$(C "$U/")
@@ -76,14 +93,16 @@ has "&lt;world&gt;" "$R" "title not escaped (XSS!)"
 has "&amp;" "$R" "ampersand not escaped"
 
 echo "== 10. authorship is recorded =="
-INV=$(python3 -c "
+UID=$(python3 -c "
 import struct;print(struct.unpack_from('<i',open('geektaco.db','rb').read(),512+12)[0])")
-[ "$INV" = "0" ] || fail "R_INVITE is $INV, expected 0"
+[ "$UID" = "0" ] || fail "R_USER is $UID, expected 0"
+# The author name comes from the account, never from a form field.
+has "alice" "$(C "$U/t/0")" "post is not attributed to the account"
 
 echo "== 11. replies and the denormalised count =="
 for i in 1 2 3; do
-  C -o /dev/null -X POST -b "gt=$CODE" "$U/reply" \
-    --data-urlencode 'p=0' --data-urlencode "a=r$i" --data-urlencode "b=reply $i"
+  C -o /dev/null -X POST -b "gs=$SESS" "$U/reply" \
+    --data-urlencode 'p=0' --data-urlencode "b=reply $i"
 done
 NR=$(python3 -c "
 import struct;print(struct.unpack_from('<I',open('geektaco.db','rb').read(),512+16)[0])")
@@ -92,15 +111,15 @@ R=$(C "$U/t/0")
 has "reply 3" "$R" "reply missing from thread page"
 
 echo "== 12. XSS probe =="
-C -o /dev/null -X POST -b "gt=$CODE" "$U/new" \
-  --data-urlencode 'a=x' --data-urlencode 't=t' \
+C -o /dev/null -X POST -b "gs=$SESS" "$U/new" \
+  --data-urlencode 't=t' \
   --data-urlencode 'b=<script>alert(1)</script>'
 R=$(C "$U/t/4")
 hasnt "<script>alert" "$R" "raw <script> reached output (XSS!)"
 has "&lt;script&gt;" "$R" "script tag not escaped"
 # Markdown: the scheme allowlist is the only thing making links safe, and
 # escape-before-markup is the only thing making the rest safe.
-C -o /dev/null -X POST -b "gt=$CODE" "$U/new" \
+C -o /dev/null -X POST -b "gs=$SESS" "$U/new" \
   --data-urlencode 't=md' \
   --data-urlencode 'b=**b** `c` [ok](https://e.com) [no](javascript:alert(1))'
 R=$(C "$U/t/5")
@@ -117,21 +136,33 @@ hasnt "/t/4" "$R" "deleted thread still listed"
 R=$(C -b "ga=$KEY" "$U/admin")
 has "deleted" "$R" "admin view should still show deleted records"
 
-echo "== 14. revoke cuts off the member =="
+echo "== 14. revoking a spent invite does not unmake the account =="
+# The invite was consumed at registration; revoking it afterwards is an audit
+# action, not a ban. Cutting off a member is a separate mechanism.
 C -o /dev/null -X POST -b "ga=$KEY" "$U/admin/rev" --data-urlencode 'i=0'
-R=$(C -i -X POST -b "gt=$CODE" "$U/new" \
-  --data-urlencode 'a=x' --data-urlencode 't=x' --data-urlencode 'b=x')
-has "403" "$R" "revoked invite can still post"
+R=$(C -i -X POST -b "gs=$SESS" "$U/new" \
+  --data-urlencode 't=still here' --data-urlencode 'b=x')
+has "302" "$R" "revoking a spent invite locked out an existing account"
 
 echo "== 15. concurrency: 40 parallel posts, no lost or duplicated slot =="
 C -o /dev/null -X POST -b "ga=$KEY" "$U/admin/inv"
 CODE2=$(python3 -c "
 d=open('geektaco.inv','rb').read()
-print(d[64:80].split(b'\0')[0].decode())")
+import struct
+n=struct.unpack_from('<I',d,12)[0]
+for i in range(n):
+    o=(i+1)*32
+    used,t,fl=struct.unpack_from('<III',d,o+16)
+    if t and not used and not fl:
+        print(d[o:o+16].split(b'\0')[0].decode()); break")
+C -o /dev/null -X POST "$U/register" --data-urlencode 'n=bulk' \
+  --data-urlencode 'w=correcthorse' --data-urlencode "c=$CODE2"
+SESS2=$(C -i -X POST "$U/login" --data-urlencode 'n=bulk' \
+  --data-urlencode 'w=correcthorse' | sed -n 's/.*gs=\([0-9a-f]*\).*/\1/p' | head -1)
 i=1
 while [ $i -le 40 ]; do
-  C -o /dev/null -X POST -b "gt=$CODE2" "$U/new" \
-    --data-urlencode "a=u$i" --data-urlencode "t=T$i" --data-urlencode "b=B$i" &
+  C -o /dev/null -X POST -b "gs=$SESS2" "$U/new" \
+    --data-urlencode "t=T$i" --data-urlencode "b=B$i" &
   i=$((i+1))
 done
 sleep 4

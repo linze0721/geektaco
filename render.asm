@@ -18,11 +18,11 @@ global render_index
 global render_thread
 global render_404
 global render_redirect
-global render_join, render_admin, render_403, render_head_cookie
+global render_login, render_register, render_admin, render_403, render_head_cookie
 
 extern db_count
 extern db_rec
-extern inv_count, inv_rec
+extern inv_count, inv_rec, usr_rec
 
 section .rodata
 
@@ -1088,8 +1088,27 @@ render_index:
         mov     edx, s_pfx_p
         xor     ecx, ecx
         call    emit_nav
+        ; Signed in: name the account and offer sign-out. Signed out: offer
+        ; the two ways in. The nav is the only place identity is visible.
+        cmp     qword [rbx + TLS_USER], 0
+        jl      .anon_nav
+        mov     edi, s_who
+        call    ob_puts
+        mov     rdi, [rbx + TLS_USER]
+        call    usr_rec
+        test    rax, rax
+        jz      .nav_out
+        lea     rdi, [rax + U_NAME]
+        push    NAME_MAX
+        pop     rsi
+        call    ob_put_esc_z
+        mov     edi, s_lg_out
+        call    ob_puts
+        jmp     .nav_out
+.anon_nav:
         mov     edi, s_nav
         call    ob_puts
+.nav_out:
         mov     edi, s_newform
         call    ob_puts
         mov     edi, s_f_a
@@ -1275,22 +1294,70 @@ render_403:
         jmp     ob_puts
 
 ; ---------------------------------------------------------------------------
-; render_join(rdi=error flag) -- the redeem page; nonzero shows the error line.
-; clobbers: caller-saved regs; preserves rbx, r12.
-render_join:
+; render_login(rdi=error code)  /  render_register(rdi=error code)
+; 0 renders clean; 1..5 select a message. Both share one body: the only
+; difference is which heading and form are emitted, so they fall through into
+; a common tail rather than duplicating the response prologue.
+; clobbers: caller-saved; preserves rbx, r12, r13.
+render_login:
         push    rbx
         push    r12
-        mov     r12, rdi                ; error flag
+        push    r13
+        mov     r12, rdi
+        mov     r13d, 1                 ; login flavour
+        jmp     render_auth_page
+render_register:
+        push    rbx
+        push    r12
+        push    r13
+        mov     r12, rdi
+        xor     r13d, r13d              ; register flavour
+render_auth_page:
         mov     rbx, [fs:TLS_SELF]
         call    emit_200
-        mov     edi, s_join_a
+        test    r13d, r13d
+        jz      .reg_head
+        mov     edi, s_lg_a
+        jmp     .head_done
+.reg_head:
+        mov     edi, s_rg_a
+.head_done:
         call    ob_puts
+        ; error line, if any
         test    r12, r12
         jz      .form
-        mov     edi, s_join_err
+        cmp     r12, 1
+        je      .e1
+        cmp     r12, 2
+        je      .e2
+        cmp     r12, 3
+        je      .e3
+        cmp     r12, 4
+        je      .e4
+        mov     edi, s_rg_e5
+        jmp     .emit_err
+.e1:
+        mov     edi, s_lg_e1
+        jmp     .emit_err
+.e2:
+        mov     edi, s_rg_e2
+        jmp     .emit_err
+.e3:
+        mov     edi, s_rg_e3
+        jmp     .emit_err
+.e4:
+        mov     edi, s_rg_e4
+.emit_err:
         call    ob_puts
 .form:
-        mov     edi, s_join_b
+        test    r13d, r13d
+        jz      .reg_form
+        mov     edi, s_lg_b
+        jmp     .form_done
+.reg_form:
+        mov     edi, s_rg_b
+.form_done:
+        pop     r13
         pop     r12
         pop     rbx
         jmp     ob_puts
