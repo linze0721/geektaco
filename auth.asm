@@ -53,7 +53,8 @@ gen_hex:
     shr rsi, 1
     cmp rsi, KEY_RAW
     jbe .fill
-    mov esi, KEY_RAW
+    push KEY_RAW
+    pop rsi
 .fill:
     mov r10, rsi
     mov rdi, rsp
@@ -88,7 +89,8 @@ gen_hex:
     xor eax, eax
     jmp .out
 .fail:
-    mov rax, -1
+    push -1
+    pop rax
 .out:
     add rsp, KEY_RAW
     ret
@@ -100,65 +102,80 @@ auth_init:
     xor ebx, ebx                  ; SYS_read; changes to SYS_write on creation.
     mov edi, key_path
     xor esi, esi
-    mov eax, SYS_open
+    push SYS_open
+    pop rax
     syscall
     test eax, eax
     jns .transfer
     cmp eax, -2                   ; ENOENT, not an unreadable/stale key.
     jne .fail
     mov edi, admin_key
-    mov esi, KEY_LEN
+    push KEY_LEN
+    pop rsi
     call gen_hex
     test eax, eax
     js .fail
     mov edi, key_path
     mov esi, O_WRONLY | O_CREAT | O_EXCL
     mov edx, KEY_MODE
-    mov eax, SYS_open
+    push SYS_open
+    pop rax
     syscall
     test eax, eax
     js .fail                      ; Never adopt a key created by a racing process.
-    mov ebx, SYS_write
+    push SYS_write
+    pop rbx
 .transfer:
     mov edi, eax
     mov esi, admin_key
-    mov edx, KEY_LEN
+    push KEY_LEN
+    pop rdx
     mov eax, ebx
     call key_io
     test eax, eax
     js .close_fail
-    mov eax, SYS_close
+    push SYS_close
+    pop rax
     syscall
     test eax, eax
     js .fail
     test ebx, ebx
     jz .ok
-    mov edi, 1
+    push 1
+    pop rdi
     mov esi, key_label
-    mov edx, key_label_len
-    mov eax, SYS_write
+    push key_label_len
+    pop rdx
+    push SYS_write
+    pop rax
     call key_io
     test eax, eax
     js .fail
     mov esi, admin_key
-    mov edx, KEY_LEN
-    mov eax, SYS_write
+    push KEY_LEN
+    pop rdx
+    push SYS_write
+    pop rax
     call key_io
     test eax, eax
     js .fail
     mov esi, key_newline
-    mov edx, 1
-    mov eax, SYS_write
+    push 1
+    pop rdx
+    push SYS_write
+    pop rax
     call key_io
     jmp .out
 .ok:
     xor eax, eax
     jmp .out
 .close_fail:
-    mov eax, SYS_close
+    push SYS_close
+    pop rax
     syscall
 .fail:
-    mov rax, -1
+    push -1
+    pop rax
 .out:
     pop rbx
     ret
@@ -178,7 +195,8 @@ key_io:
     xor eax, eax
     ret
 .fail:
-    mov rax, -1
+    push -1
+    pop rax
     ret
 
 ; rdi=candidate, rsi=length. Returns 1 for the admin key, otherwise 0.
@@ -186,7 +204,8 @@ auth_check_admin:
     xor eax, eax
     cmp rsi, KEY_LEN
     jne .out
-    mov ecx, KEY_LEN
+    push KEY_LEN
+    pop rcx
     ; Never exit on a differing byte: request timing can reveal this 32-char
     ; key one byte at a time. Every byte contributes before the branchless result.
 .compare:
@@ -222,7 +241,8 @@ invite_find:
     jnz .next
     lea rdi, [rax + I_CODE]
     xor eax, eax
-    mov ecx, CODE_LEN
+    push CODE_LEN
+    pop rcx
 .compare:
     mov dl, [rbx + rcx - 1]
     xor dl, [rdi + rcx - 1]
@@ -238,14 +258,16 @@ invite_find:
     mov rax, r12
     jmp .out
 .missing:
-    mov rax, -1
+    push -1
+    pop rax
 .out:
     pop r12
     pop rbp
     pop rbx
     ret
 .bad_length:
-    mov rax, -1
+    push -1
+    pop rax
     ret
 
 ; Returns a new invite index or -1. A failed fill/commit leaves a skippable hole.
@@ -259,10 +281,12 @@ invite_create:
     call inv_rec
     mov rdi, rax
     xor eax, eax
-    mov ecx, INV_SIZE / 8
+    push INV_SIZE / 8
+    pop rcx
     rep stosq
     sub rdi, INV_SIZE - I_CODE
-    mov esi, CODE_LEN
+    push CODE_LEN
+    pop rsi
     call gen_hex
     test eax, eax
     js .out
@@ -317,7 +341,8 @@ invite_revoke:
     xor eax, eax
     jmp .out
 .bad:
-    mov rax, -1
+    push -1
+    pop rax
 .out:
     pop rbx
     ret
@@ -495,12 +520,14 @@ session_resolve:
     mov rsi, r13
     mov edx, ck_sess
     mov rcx, rsp
-    mov r8d, SESS_LEN
+    push SESS_LEN
+    pop r8
     call cookie_get
     cmp rax, SESS_LEN
     jne .admin
     mov rdi, rsp
-    mov esi, SESS_LEN
+    push SESS_LEN
+    pop rsi
     call session_verify
     movsx rax, eax                  ; keep -1 sign-extended for signed tests
     mov [rbx + TLS_USER], rax
@@ -511,12 +538,14 @@ session_resolve:
     mov rsi, r13
     mov edx, ck_admin
     mov rcx, rsp
-    mov r8d, KEY_LEN
+    push KEY_LEN
+    pop r8
     call cookie_get
     cmp rax, KEY_LEN
     jne .out
     mov rdi, rsp
-    mov esi, KEY_LEN
+    push KEY_LEN
+    pop rsi
     call auth_check_admin
     mov [rbx + TLS_ADMIN], rax
 
@@ -552,22 +581,28 @@ sha256:
         mov     r13, rsi                ; len
         mov     r14, rdx                ; dest
         ; socket(AF_ALG, SOCK_SEQPACKET, 0)
-        mov     eax, SYS_socket
-        mov     edi, AF_ALG
-        mov     esi, SOCK_SEQPACKET
+        push     SYS_socket
+        pop     rax
+        push     AF_ALG
+        pop     rdi
+        push     SOCK_SEQPACKET
+        pop     rsi
         xor     edx, edx
         syscall
         test    eax, eax
         js      .fail
         mov     ebx, eax                ; bound socket
-        mov     eax, SYS_bind
+        push     SYS_bind
+        pop     rax
         mov     edi, ebx
         mov     esi, alg_addr
-        mov     edx, alg_addr_len
+        push     alg_addr_len
+        pop     rdx
         syscall
         test    eax, eax
         js      .close_bound
-        mov     eax, SYS_accept
+        push     SYS_accept
+        pop     rax
         mov     edi, ebx
         xor     esi, esi
         xor     edx, edx
@@ -575,40 +610,48 @@ sha256:
         test    eax, eax
         js      .close_bound
         push    rax                     ; operation fd
-        mov     eax, SYS_write
+        push     SYS_write
+        pop     rax
         mov     edi, [rsp]
         mov     rsi, r12
         mov     rdx, r13
         syscall
         test    eax, eax
         js      .close_both
-        mov     eax, SYS_read
+        push     SYS_read
+        pop     rax
         mov     edi, [rsp]
         mov     rsi, r14
-        mov     edx, HASH_LEN
+        push     HASH_LEN
+        pop     rdx
         syscall
         cmp     eax, HASH_LEN
         jne     .close_both
-        mov     eax, SYS_close
+        push     SYS_close
+        pop     rax
         mov     edi, [rsp]
         syscall
         add     rsp, 8
-        mov     eax, SYS_close
+        push     SYS_close
+        pop     rax
         mov     edi, ebx
         syscall
         xor     eax, eax
         jmp     .out
 .close_both:
-        mov     eax, SYS_close
+        push     SYS_close
+        pop     rax
         mov     edi, [rsp]
         syscall
         add     rsp, 8
 .close_bound:
-        mov     eax, SYS_close
+        push     SYS_close
+        pop     rax
         mov     edi, ebx
         syscall
 .fail:
-        mov     rax, -1
+        push     -1
+        pop     rax
 .out:
         pop     r14
         pop     r13
@@ -634,7 +677,8 @@ user_init:
 .secret:
         mov     eax, SYS_getrandom
         mov     edi, sess_secret
-        mov     esi, SECRET_LEN
+        push     SECRET_LEN
+        pop     rsi
         xor     edx, edx
         syscall
         cmp     eax, SECRET_LEN
@@ -642,7 +686,8 @@ user_init:
         xor     eax, eax
         ret
 .fail:
-        mov     rax, -1
+        push     -1
+        pop     rax
         ret
 
 ; usr_count() -> rax = clamped cursor.
@@ -659,7 +704,8 @@ usr_count:
 usr_rec:
         mov     rsi, [usr_base]
         mov     edx, MAX_USERS
-        mov     ecx, USR_SHIFT
+        push     USR_SHIFT
+        pop     rcx
         jmp     record_ptr
 
 ; usr_reserve() -> index, or -1.
@@ -672,7 +718,8 @@ usr_reserve:
 usr_commit:
         push    rdx
         call    usr_rec
-        mov     edx, U_TIME
+        push     U_TIME
+        pop     rdx
         jmp     record_commit
 
 ; ---------------------------------------------------------------------------
@@ -722,7 +769,8 @@ user_find:
         inc     rbx
         jmp     .scan
 .none:
-        mov     rax, -1
+        push     -1
+        pop     rax
 .out:
         pop     r14
         pop     r13
@@ -763,7 +811,8 @@ name_ok:
         inc     rcx
         jmp     .loop
 .yes:
-        mov     eax, 1
+        push     1
+        pop     rax
         ret
 .no:
         xor     eax, eax
@@ -804,7 +853,8 @@ hash_pw:
         call    sha256
         jmp     .out
 .fail:
-        mov     rax, -1
+        push     -1
+        pop     rax
 .out:
         add     rsp, 96
         pop     r12
@@ -858,7 +908,8 @@ user_create:
         ; zero the record so unused bytes stay NUL
         mov     rdi, rax
         xor     eax, eax
-        mov     ecx, USR_SIZE / 8
+        push     USR_SIZE / 8
+        pop     rcx
         rep     stosq
         mov     rax, [rsp]
         mov     [rax + U_INVITE], r15d
@@ -873,7 +924,8 @@ user_create:
         jmp     .cp_name
 .salt:
         lea     rdi, [rax + U_SALT]
-        mov     esi, SALT_LEN
+        push     SALT_LEN
+        pop     rsi
         xor     edx, edx
         push    rax
         mov     eax, SYS_getrandom
@@ -897,7 +949,8 @@ user_create:
 .fail_pop:
         add     rsp, 8
 .fail:
-        mov     rax, -1
+        push     -1
+        pop     rax
         jmp     .out
 .bad_name:
         mov     rax, -4
@@ -966,7 +1019,8 @@ user_check:
         mov     rax, rbx
         jmp     .out
 .no:
-        mov     rax, -1
+        push     -1
+        pop     rax
 .out:
         add     rsp, 40
         pop     r13
@@ -989,7 +1043,8 @@ sess_mac:
         sub     rsp, 80                 ; secret||idx buffer + digest
         mov     rbx, rsi
         mov     r12, rdi
-        mov     ecx, SECRET_LEN / 8
+        push     SECRET_LEN / 8
+        pop     rcx
         mov     esi, sess_secret
         mov     rdx, rsp
 .cp:
@@ -1002,7 +1057,8 @@ sess_mac:
         mov     rax, [r12]              ; the 8 index hex chars
         mov     [rsp + SECRET_LEN], rax
         mov     rdi, rsp
-        mov     esi, SECRET_LEN + SESS_IDXLEN
+        push     SECRET_LEN + SESS_IDXLEN
+        pop     rsi
         lea     rdx, [rsp + 40]
         call    sha256
         test    rax, rax
@@ -1030,7 +1086,8 @@ sess_mac:
 
 ; idx_hex(rdi=value, rsi=dest8) -- 8 lowercase hex chars, zero padded.
 idx_hex:
-        mov     ecx, 8
+        push     8
+        pop     rcx
 .loop:
         dec     ecx
         mov     eax, edi
@@ -1116,7 +1173,8 @@ session_verify:
         mov     rax, r12
         jmp     .out
 .no:
-        mov     rax, -1
+        push     -1
+        pop     rax
 .out:
         add     rsp, 24
         pop     r12

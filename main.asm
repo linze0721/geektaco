@@ -128,18 +128,19 @@ _start:
     mov esi, r14d
     call http_parse
     test eax, eax
-    js .not_found
-    cmp qword [rbx + TLS_METHOD], M_POST
+    js .early_404
+    ; http_parse stores M_GET/M_POST/M_OTHER as a zero-extended qword.
+    cmp byte [rbx + TLS_METHOD], M_POST
     jne .resolve                    ; GET carries cookies too: /admin needs them
     mov rax, [rbx + TLS_CLEN]
     cmp [rbx + TLS_BODYLEN], rax
     jae .resolve
     cmp qword [rbx + TLS_BODY], 0
-    je .not_found
+    je .early_404
 
 .read_body:
     cmp r14d, REQ_SIZE
-    jae .not_found                  ; Never persist an incomplete POST body.
+    jae .early_404                  ; Never persist an incomplete POST body.
     xor eax, eax                    ; SYS_read
     mov edi, r13d
     mov rsi, [rbx + TLS_REQ]
@@ -148,7 +149,7 @@ _start:
     sub edx, r14d
     syscall
     test eax, eax
-    jle .not_found
+    jle .early_404
     add r14d, eax
 
     mov rax, [rbx + TLS_BODY]
@@ -166,491 +167,10 @@ _start:
     mov rdi, [rbx + TLS_REQ]
     mov esi, r14d
     call session_resolve
+    ; Every route handler ends by tail-jumping into a page builder, whose ret
+    ; lands on .respond. Handlers keep the stack balanced within this frame.
+    call .route
 
-.route:
-    mov rdi, [rbx + TLS_PATH]
-    mov rcx, [rbx + TLS_PATHLEN]
-    cmp qword [rbx + TLS_METHOD], M_GET
-    je .get
-    cmp qword [rbx + TLS_METHOD], M_POST
-    je .post
-    jmp .not_found
-
-.get:
-    cmp ecx, 1
-    jne .get_page
-    cmp byte [rdi], '/'
-    jne .not_found
-    xor edi, edi                    ; page 0
-    call render_index
-    jmp .respond
-
-.get_page:
-    cmp ecx, 4                      ; "/p/" + at least one digit
-    jb .get_login
-    cmp word [rdi], '/p'
-    jne .get_login
-    cmp byte [rdi + 2], '/'
-    jne .get_login
-    add rdi, 3
-    lea esi, [rcx - 3]
-    call parse_uint
-    test edx, edx
-    jz .not_found                   ; "/p/abc" is malformed, not page 0
-    mov edi, eax
-    call render_index
-    jmp .respond
-
-; A non-matching path of the same length MUST fall through, not 404: "/t/60"
-; is also 5 bytes, and "/t/123" is also 6.
-.get_login:
-    cmp ecx, 6
-    jne .get_register
-    cmp dword [rdi], '/log'
-    jne .get_register
-    cmp word [rdi + 4], 'in'
-    jne .get_register
-    xor edi, edi                    ; no error yet
-    call render_login
-    jmp .respond
-
-.get_register:
-    cmp ecx, 9
-    jne .get_admin
-    cmp dword [rdi], '/reg'
-    jne .get_admin
-    cmp dword [rdi + 4], 'iste'
-    jne .get_admin
-    cmp byte [rdi + 8], 'r'
-    jne .get_admin
-    xor edi, edi
-    call render_register
-    jmp .respond
-
-.get_admin:
-    cmp ecx, 6
-    jne .get_thread
-    cmp dword [rdi], '/adm'
-    jne .get_thread
-    cmp word [rdi + 4], 'in'
-    jne .get_thread
-    cmp qword [rbx + TLS_ADMIN], 1
-    jne .not_found              ; 404 not 403: do not confirm the panel exists.
-    call render_admin
-    jmp .respond
-
-; /t/<n> and /t/<n>/<m>. The trailing segment, when present, must parse: a
-; malformed "/t/0/abc" is a bad URL, not silently page 0.
-.get_thread:
-    cmp ecx, 3
-    jb .not_found
-    cmp word [rdi], '/t'
-    jne .not_found
-    cmp byte [rdi + 2], '/'
-    jne .not_found
-    add rdi, 3
-    lea esi, [rcx - 3]
-    ; parse_uint clobbers every caller-saved register, so the cursor and the
-    ; remaining length are spilled; the root index goes in rbp, which is
-    ; callee-saved and therefore survives the second parse without a push
-    ; that the .not_found exits would have to unwind.
-    push rsi
-    push rdi
-    call parse_uint
-    pop rdi
-    pop rsi
-    test edx, edx
-    jz .not_found
-    mov ebp, eax                    ; root index
-    sub esi, edx                    ; bytes after the index digits
-    jz .thread_p0
-    add rdi, rdx                    ; advance past the digits
-    cmp byte [rdi], '/'
-    jne .not_found
-    inc rdi
-    dec esi
-    jz .not_found                   ; "/t/<n>/" with no page number
-    push rsi
-    call parse_uint
-    pop rsi
-    test edx, edx
-    jz .not_found
-    cmp edx, esi
-    jne .not_found                  ; trailing junk after the page number
-    mov esi, eax
-    mov edi, ebp
-    call render_thread
-    jmp .respond
-.thread_p0:
-    mov edi, ebp
-    xor esi, esi
-    call render_thread
-    jmp .respond
-
-.post:
-    cmp ecx, 4
-    jne .post_login
-    cmp dword [rdi], '/new'
-    jne .not_found
-    cmp qword [rbx + TLS_USER], 0
-    jl .forbidden               ; signed: TLS_USER is a sign-extended -1.
-    jmp .new
-
-; Same-length paths must fall through to the next candidate, never 404:
-; "/login" and "/reply" are both 6 bytes.
-.post_login:
-    cmp ecx, 6
-    jne .post_logout
-    cmp dword [rdi], '/log'
-    jne .post_reply
-    cmp word [rdi + 4], 'in'
-    jne .post_reply
-    jmp .login
-
-.post_reply:
-    cmp ecx, 6
-    jne .post_logout
-    cmp dword [rdi], '/rep'
-    jne .post_logout
-    cmp word [rdi + 4], 'ly'
-    jne .post_logout
-    cmp qword [rbx + TLS_USER], 0
-    jl .forbidden               ; signed: TLS_USER is a sign-extended -1.
-    jmp .reply
-
-.post_logout:
-    cmp ecx, 7
-    jne .post_register
-    cmp dword [rdi], '/log'
-    jne .post_register
-    cmp word [rdi + 4], 'ou'
-    jne .post_register
-    cmp byte [rdi + 6], 't'
-    jne .post_register
-    jmp .logout
-
-.post_register:
-    cmp ecx, 9
-    jne .post_admin
-    cmp dword [rdi], '/reg'
-    jne .post_admin
-    cmp dword [rdi + 4], 'iste'
-    jne .post_admin
-    cmp byte [rdi + 8], 'r'
-    jne .post_admin
-    jmp .register
-
-.post_admin:
-    cmp ecx, 10
-    jne .not_found
-    cmp dword [rdi], '/adm'
-    jne .not_found
-    cmp dword [rdi + 4], 'in/i'     ; "/admin/inv"
-    je .admin_inv_check
-    cmp dword [rdi + 4], 'in/r'     ; "/admin/rev"
-    je .admin_rev_check
-    cmp dword [rdi + 4], 'in/d'     ; "/admin/del"
-    je .admin_del_check
-    jmp .not_found
-.admin_inv_check:
-    cmp word [rdi + 8], 'nv'
-    jne .not_found
-    cmp qword [rbx + TLS_ADMIN], 1
-    jne .not_found              ; 404 not 403: do not confirm the panel exists.
-    jmp .admin_inv
-.admin_rev_check:
-    cmp word [rdi + 8], 'ev'
-    jne .not_found
-    cmp qword [rbx + TLS_ADMIN], 1
-    jne .not_found              ; 404 not 403: do not confirm the panel exists.
-    jmp .admin_rev
-.admin_del_check:
-    cmp word [rdi + 8], 'el'
-    jne .not_found
-    cmp qword [rbx + TLS_ADMIN], 1
-    jne .not_found              ; 404 not 403: do not confirm the panel exists.
-    jmp .admin_del
-
-.new:
-    call .prepare_record
-    mov r14d, eax                  ; Keep body length without replacing TLS base.
-    mov edx, key_title
-    mov rcx, [rbx + TLS_REC]
-    add rcx, R_TITLE
-    push TITLE_MAX - 1
-    pop r8
-    call .field
-    test eax, eax
-    jnz .new_append
-    test r14d, r14d
-    jz .new_redirect                ; Reject only when both title and body are empty.
-    mov rdi, [rbx + TLS_REC]
-    add rdi, R_TITLE
-    mov esi, untitled
-    push untitled_len
-    pop rcx
-    rep movsb
-.new_append:
-    mov r15d, -1                   ; Root parent becomes its own reserved index.
-    call .append_record
-    test eax, eax
-    js .not_found
-.new_redirect:
-    mov edi, root_path
-    call render_redirect
-    jmp .respond
-
-.reply:
-    mov edx, key_parent
-    mov rcx, [rbx + TLS_SCRATCH]
-    push 32
-    pop r8
-    call .field
-    mov esi, eax
-    mov rdi, [rbx + TLS_SCRATCH]
-    call parse_uint
-    test edx, edx
-    jz .not_found
-    mov r15d, eax
-    mov edi, eax
-    call db_rec
-    test rax, rax
-    jz .not_found
-    cmp dword [rax + R_TIME], 0
-    je .not_found                  ; Reserved slots are not yet readable.
-    cmp [rax + R_PARENT], r15d
-    jne .not_found                 ; Replies must target a root, not a reply.
-    test byte [rax + R_FLAGS], FLAG_DELETED
-    jnz .not_found
-    mov rbp, rax                   ; Keep the full mapped root address.
-
-    call .prepare_record
-    test eax, eax
-    jz .reply_redirect
-    call .append_record
-    test eax, eax
-    js .not_found
-    ; Count AFTER commit: a crash cannot leave a count with no published reply.
-    ; Readers may briefly see a low count; the following increment resolves it.
-    lock inc dword [rbp + R_NREPLY]
-.reply_redirect:
-    mov rsi, [rbx + TLS_SCRATCH]
-    mov dword [rsi], '/t/'
-    mov edi, r15d
-    add rsi, 3
-    call .utoa
-    mov rdi, [rbx + TLS_SCRATCH]
-    call render_redirect
-    jmp .respond
-
-; --- POST /register ------------------------------------------------------
-; An invite is a one-shot ticket to create an account, spent here rather than
-; at first post: the account is the durable identity from this point on.
-.register:
-    mov edx, key_name
-    mov rcx, [rbx + TLS_SCRATCH]
-    push NAME_MAX - 1
-    pop r8
-    call .field
-    test eax, eax
-    jz .reg_bad_name
-    mov r15d, eax                   ; name length
-    ; password into the record scratch, which is free until a post is built
-    mov edx, key_pass
-    mov rcx, [rbx + TLS_REC]
-    push PASS_MAX
-    pop r8
-    call .field
-    test eax, eax
-    jz .reg_short
-    mov r14d, eax                   ; password length
-    ; invite code into the second half of scratch
-    mov edx, key_code
-    mov rcx, [rbx + TLS_SCRATCH]
-    add rcx, 64
-    push CODE_LEN
-    pop r8
-    call .field
-    cmp eax, CODE_LEN
-    jne .reg_bad_invite
-    mov rdi, [rbx + TLS_SCRATCH]
-    add rdi, 64
-    push CODE_LEN
-    pop rsi
-    call invite_find
-    test eax, eax
-    js .reg_bad_invite
-    push rax                        ; invite index; r13 is the client fd
-    ; lowercase the name in place: names are stored and compared lowercased
-    mov rdi, [rbx + TLS_SCRATCH]
-    xor ecx, ecx
-.reg_lower:
-    cmp ecx, r15d
-    jae .reg_go
-    movzx eax, byte [rdi + rcx]
-    cmp al, 'A'
-    jb .reg_lnext
-    cmp al, 'Z'
-    ja .reg_lnext
-    or byte [rdi + rcx], 0x20
-.reg_lnext:
-    inc ecx
-    jmp .reg_lower
-.reg_go:
-    mov rdi, [rbx + TLS_SCRATCH]
-    mov esi, r15d
-    mov rdx, [rbx + TLS_REC]
-    mov ecx, r14d
-    pop r8                          ; invite index back off the stack
-    call user_create
-    test eax, eax
-    js .reg_err
-    jmp .login_ok                   ; account made: hand out a session
-.reg_err:
-    neg eax                         ; -3 taken, -4 malformed, -5 short
-    mov edi, eax
-    call render_register
-    jmp .respond
-.reg_bad_name:
-    push 4
-    pop rdi
-    call render_register
-    jmp .respond
-.reg_short:
-    push 5
-    pop rdi
-    call render_register
-    jmp .respond
-.reg_bad_invite:
-    push 2
-    pop rdi
-    call render_register
-    jmp .respond
-
-; --- POST /login ----------------------------------------------------------
-.login:
-    mov edx, key_name
-    mov rcx, [rbx + TLS_SCRATCH]
-    push NAME_MAX - 1
-    pop r8
-    call .field
-    test eax, eax
-    jz .login_bad
-    mov r15d, eax
-    mov edx, key_pass
-    mov rcx, [rbx + TLS_REC]
-    push PASS_MAX
-    pop r8
-    call .field
-    test eax, eax
-    jz .login_bad
-    mov r14d, eax
-    mov rdi, [rbx + TLS_SCRATCH]
-    xor ecx, ecx
-.login_lower:
-    cmp ecx, r15d
-    jae .login_chk
-    movzx eax, byte [rdi + rcx]
-    cmp al, 'A'
-    jb .login_lnext
-    cmp al, 'Z'
-    ja .login_lnext
-    or byte [rdi + rcx], 0x20
-.login_lnext:
-    inc ecx
-    jmp .login_lower
-.login_chk:
-    mov rdi, [rbx + TLS_SCRATCH]
-    mov esi, r15d
-    mov rdx, [rbx + TLS_REC]
-    mov ecx, r14d
-    call user_check
-    test eax, eax
-    js .login_bad
-.login_ok:
-    ; eax holds the user index; mint a signed cookie for it
-    mov edi, eax
-    mov rsi, [rbx + TLS_SCRATCH]
-    add rsi, 128
-    call session_make
-    mov edi, ck_gs
-    mov rsi, [rbx + TLS_SCRATCH]
-    add rsi, 128
-    push SESS_LEN
-    pop rdx
-    call render_head_cookie
-    jmp .respond
-.login_bad:
-    push 1
-    pop rdi
-    call render_login
-    jmp .respond
-
-; --- POST /logout ---------------------------------------------------------
-; Clearing the cookie is enough: the server keeps no session state, so an
-; expired cookie is simply one that no longer verifies.
-.logout:
-    mov edi, ck_gs
-    mov rsi, [rbx + TLS_SCRATCH]
-    mov byte [rsi], 0
-    xor edx, edx                    ; empty value
-    call render_head_cookie
-    jmp .respond
-
-; --- admin actions --------------------------------------------------------
-.admin_inv:
-    call invite_create              ; -1 (table full) just skips creation
-    jmp .admin_done
-
-.admin_rev:
-    call .admin_index
-    js .admin_done
-    mov edi, eax
-    call invite_revoke
-    jmp .admin_done
-
-.admin_del:
-    call .admin_index
-    js .admin_done
-    mov r15d, eax
-    mov edi, eax
-    call db_rec
-    test rax, rax
-    jz .admin_done
-    ; lock: a worker may be rendering this record right now, and a plain
-    ; read-modify-write could drop a concurrent flag update.
-    lock or dword [rax + R_FLAGS], FLAG_DELETED
-
-.admin_done:
-    mov edi, admin_path
-    call render_redirect
-    jmp .respond
-
-; Parse the `i` form field. Returns the index in eax, or sets SF on failure.
-.admin_index:
-    mov edx, key_index
-    mov rcx, [rbx + TLS_SCRATCH]
-    push 32
-    pop r8
-    call .field
-    mov esi, eax
-    mov rdi, [rbx + TLS_SCRATCH]
-    call parse_uint
-    test edx, edx
-    jz .admin_index_bad
-    test eax, eax                   ; clears SF for a valid index
-    ret
-.admin_index_bad:
-    mov eax, -1
-    test eax, eax                   ; sets SF
-    ret
-
-.forbidden:
-    call render_403
-    jmp .respond
-
-.not_found:
-    call render_404
 .respond:
     mov r15, [rbx + TLS_OBUF]
     mov r14, [rbx + TLS_OBLEN]
@@ -680,6 +200,436 @@ _start:
     pop rax
     syscall
     jmp .accept
+
+; Rejected before routing: no identity is resolved for a malformed request.
+.early_404:
+    call render_404
+    jmp .respond
+
+; Called with rbx = TLS base; returns through a page builder's ret.
+.route:
+    mov rdi, [rbx + TLS_PATH]
+    mov rcx, [rbx + TLS_PATHLEN]
+    mov eax, [rbx + TLS_METHOD]
+    dec eax                         ; M_GET -> -1, M_POST -> 0, M_OTHER -> 1
+    jz .post
+    jns .not_found
+
+.get:
+    cmp ecx, 1
+    jne .get_page
+    cmp byte [rdi], '/'
+    jne .not_found
+    xor edi, edi                    ; page 0
+    jmp render_index
+
+.get_page:
+    cmp ecx, 4                      ; "/p/" + at least one digit
+    jb .get_login
+    cmp word [rdi], '/p'
+    jne .get_login
+    cmp byte [rdi + 2], '/'
+    jne .get_login
+    add rdi, 3
+    lea esi, [rcx - 3]
+    call parse_uint
+    test edx, edx
+    jz .not_found                   ; "/p/abc" is malformed, not page 0
+    xchg eax, edi
+    jmp render_index
+
+; A non-matching path of the same length MUST fall through, not 404: "/t/60"
+; is also 5 bytes, and "/t/123" is also 6.
+.get_login:
+    cmp ecx, 6
+    jne .get_register
+    cmp dword [rdi], '/log'
+    jne .get_register
+    cmp word [rdi + 4], 'in'
+    jne .get_register
+    xor edi, edi                    ; no error yet
+    jmp render_login
+
+.get_register:
+    cmp ecx, 9
+    jne .get_admin
+    cmp dword [rdi], '/reg'
+    jne .get_admin
+    cmp dword [rdi + 4], 'iste'
+    jne .get_admin
+    cmp byte [rdi + 8], 'r'
+    jne .get_admin
+    xor edi, edi
+    jmp render_register
+
+.get_admin:
+    cmp ecx, 6
+    jne .get_thread
+    cmp dword [rdi], '/adm'
+    jne .get_thread
+    cmp word [rdi + 4], 'in'
+    jne .get_thread
+    ; TLS_ADMIN is always the qword 0 or 1, so its low byte decides.
+    cmp byte [rbx + TLS_ADMIN], 1
+    jne .not_found              ; 404 not 403: do not confirm the panel exists.
+    jmp render_admin
+
+; /t/<n> and /t/<n>/<m>. The trailing segment, when present, must parse: a
+; malformed "/t/0/abc" is a bad URL, not silently page 0.
+.get_thread:
+    cmp ecx, 3
+    jb .not_found
+    cmp word [rdi], '/t'
+    jne .not_found
+    cmp byte [rdi + 2], '/'
+    jne .not_found
+    add rdi, 3
+    lea esi, [rcx - 3]
+    ; parse_uint leaves rdi/rsi intact; the root index goes in rbp.
+    call parse_uint
+    test edx, edx
+    jz .not_found
+    mov ebp, eax                    ; root index
+    sub esi, edx                    ; bytes after the index digits
+    jz .thread_go                   ; esi = 0: first reply page
+    add rdi, rdx                    ; advance past the digits
+    cmp byte [rdi], '/'
+    jne .not_found
+    inc rdi
+    dec esi
+    jz .not_found                   ; "/t/<n>/" with no page number
+    call parse_uint
+    test edx, edx
+    jz .not_found
+    cmp edx, esi
+    jne .not_found                  ; trailing junk after the page number
+    xchg eax, esi
+.thread_go:
+    mov edi, ebp
+    jmp render_thread
+
+.forbidden:
+    jmp render_403
+
+.post:
+    cmp ecx, 4
+    jne .post_login
+    cmp dword [rdi], '/new'
+    jne .not_found
+    cmp qword [rbx + TLS_USER], 0
+    jl .forbidden               ; signed: TLS_USER is a sign-extended -1.
+    jmp .new
+
+.not_found:
+    jmp render_404
+
+; Same-length paths must fall through to the next candidate, never 404:
+; "/login" and "/reply" are both 6 bytes.
+.post_login:
+    cmp ecx, 6
+    jne .post_logout
+    cmp dword [rdi], '/log'
+    jne .post_reply
+    cmp word [rdi + 4], 'in'
+    je .login
+
+.post_reply:
+    cmp dword [rdi], '/rep'
+    jne .not_found
+    cmp word [rdi + 4], 'ly'
+    jne .not_found
+    cmp qword [rbx + TLS_USER], 0
+    jl .forbidden               ; signed: TLS_USER is a sign-extended -1.
+    jmp .reply
+
+.post_logout:
+    cmp ecx, 7
+    jne .post_register
+    cmp dword [rdi], '/log'
+    jne .not_found
+    cmp word [rdi + 4], 'ou'
+    jne .not_found
+    cmp byte [rdi + 6], 't'
+    jne .not_found
+; --- POST /logout ---------------------------------------------------------
+; Clearing the cookie is enough: the server keeps no session state, so an
+; expired cookie is simply one that no longer verifies.
+    mov edi, ck_gs
+    mov rsi, [rbx + TLS_SCRATCH]
+    mov byte [rsi], 0
+    xor edx, edx                    ; empty value
+    jmp render_head_cookie
+
+.post_register:
+    cmp ecx, 9
+    jne .post_admin
+    cmp dword [rdi], '/reg'
+    jne .not_found
+    cmp dword [rdi + 4], 'iste'
+    jne .not_found
+    cmp byte [rdi + 8], 'r'
+    je .register
+.not_found2:
+    jmp render_404
+
+; "/admin/inv", "/admin/rev", "/admin/del". Any other 10-byte path is a 404
+; with or without the key, so the key is checked once for all three.
+.post_admin:
+    cmp ecx, 10
+    jne .not_found2
+    cmp dword [rdi], '/adm'
+    jne .not_found2
+    cmp word [rdi + 4], 'in'
+    jne .not_found2
+    cmp byte [rbx + TLS_ADMIN], 1
+    jne .not_found2             ; 404 not 403: do not confirm the panel exists.
+    mov eax, [rdi + 6]
+    cmp eax, '/inv'
+    je .admin_inv
+    cmp eax, '/del'
+    je .admin_del
+    cmp eax, '/rev'
+    jne .not_found2
+
+; --- admin actions --------------------------------------------------------
+.admin_rev:
+    mov edx, key_index
+    call .num_field
+    jz .admin_done
+    xchg eax, edi
+    call invite_revoke
+    jmp .admin_done
+
+.admin_del:
+    mov edx, key_index
+    call .num_field
+    jz .admin_done
+    xchg eax, edi
+    call db_rec
+    test rax, rax
+    jz .admin_done
+    ; lock: a worker may be rendering this record right now, and a plain
+    ; read-modify-write could drop a concurrent flag update.
+    lock or dword [rax + R_FLAGS], FLAG_DELETED
+    jmp .admin_done
+
+.admin_inv:
+    call invite_create              ; -1 (table full) just skips creation
+.admin_done:
+    mov edi, admin_path
+    jmp render_redirect
+
+.new:
+    call .prepare_record
+    mov r14d, eax                  ; Keep body length without replacing TLS base.
+    mov edx, key_title
+    mov rcx, [rbx + TLS_REC]
+    add rcx, R_TITLE
+    push TITLE_MAX - 1
+    pop r8
+    call .field
+    test eax, eax
+    jnz .new_append
+    test r14d, r14d
+    jz .new_redirect                ; Reject only when both title and body are empty.
+    mov rdi, [rbx + TLS_REC]
+    add rdi, R_TITLE
+    mov esi, untitled
+    push untitled_len
+    pop rcx
+    rep movsb
+.new_append:
+    or r15d, -1                    ; Root parent becomes its own reserved index.
+    call .append_record
+    test eax, eax
+    js .not_found2
+.new_redirect:
+    mov edi, root_path
+    jmp render_redirect
+
+.reply:
+    mov edx, key_parent
+    call .num_field
+    jz .not_found2
+    mov r15d, eax
+    xchg eax, edi
+    call db_rec
+    test rax, rax
+    jz .not_found2
+    cmp dword [rax + R_TIME], 0
+    je .not_found2                 ; Reserved slots are not yet readable.
+    cmp [rax + R_PARENT], r15d
+    jne .not_found2                ; Replies must target a root, not a reply.
+    test byte [rax + R_FLAGS], FLAG_DELETED
+    jnz .not_found2
+    mov rbp, rax                   ; Keep the full mapped root address.
+
+    call .prepare_record
+    test eax, eax
+    jz .reply_redirect
+    call .append_record
+    test eax, eax
+    js .not_found2
+    ; Count AFTER commit: a crash cannot leave a count with no published reply.
+    ; Readers may briefly see a low count; the following increment resolves it.
+    lock inc dword [rbp + R_NREPLY]
+.reply_redirect:
+    ; "/t/<root>" in scratch: digits are pushed low-first and popped in order.
+    ; The root index is below MAX_POSTS, so cdq zeroes edx for the division.
+    mov rdi, [rbx + TLS_SCRATCH]
+    push rdi
+    mov dword [rdi], '/t/'
+    add rdi, 3
+    xchg eax, r15d
+    push 10
+    pop rcx
+    xor esi, esi
+.utoa_digit:
+    cdq
+    div ecx
+    push rdx
+    inc esi
+    test eax, eax
+    jnz .utoa_digit
+.utoa_emit:
+    pop rax
+    add al, '0'
+    stosb
+    dec esi
+    jnz .utoa_emit
+    xchg eax, esi                   ; al = 0: NUL terminator
+    stosb
+    pop rdi
+    jmp render_redirect
+
+; --- POST /register ------------------------------------------------------
+; An invite is a one-shot ticket to create an account, spent here rather than
+; at first post: the account is the durable identity from this point on.
+.register:
+    call .name_field
+    jz .reg_bad_name
+    mov r15d, eax                   ; name length
+    ; password into the record scratch, which is free until a post is built
+    call .pass_field
+    jz .reg_short
+    mov r14d, eax                   ; password length
+    ; invite code into the second half of scratch
+    mov edx, key_code
+    mov rcx, [rbx + TLS_SCRATCH]
+    add rcx, 64
+    push CODE_LEN
+    pop r8
+    call .field
+    cmp eax, CODE_LEN
+    jne .reg_bad_invite
+    mov rdi, [rbx + TLS_SCRATCH]
+    add rdi, 64
+    push CODE_LEN
+    pop rsi
+    call invite_find
+    test eax, eax
+    js .reg_bad_invite
+    xchg eax, r8d                   ; invite index; r13 is the client fd
+    mov rdi, [rbx + TLS_SCRATCH]
+    mov esi, r15d
+    mov rdx, [rbx + TLS_REC]
+    mov ecx, r14d
+    call user_create
+    test eax, eax
+    jns .login_ok                   ; account made: hand out a session
+    neg eax                         ; -3 taken, -4 malformed, -5 short
+    push rax
+    jmp .reg_render
+.reg_bad_name:
+    push 4
+    jmp .reg_render
+.reg_short:
+    push 5
+    jmp .reg_render
+.reg_bad_invite:
+    push 2
+.reg_render:
+    pop rdi
+    jmp render_register
+
+; --- POST /login ----------------------------------------------------------
+.login:
+    call .name_field
+    jz .login_bad
+    mov r15d, eax
+    call .pass_field
+    jz .login_bad
+    mov rdi, [rbx + TLS_SCRATCH]
+    mov esi, r15d
+    mov rdx, [rbx + TLS_REC]
+    xchg eax, ecx
+    call user_check
+    test eax, eax
+    js .login_bad
+.login_ok:
+    ; eax holds the user index; mint a signed cookie for it
+    xchg eax, edi
+    mov rsi, [rbx + TLS_SCRATCH]
+    sub rsi, -128
+    mov rbp, rsi
+    call session_make
+    mov edi, ck_gs
+    mov rsi, rbp
+    push SESS_LEN
+    pop rdx
+    jmp render_head_cookie
+.login_bad:
+    push 1
+    pop rdi
+    jmp render_login
+
+; edx=key. Parses a decimal form field via scratch: eax=value, ZF set when the
+; field has no leading digits.
+.num_field:
+    mov rcx, [rbx + TLS_SCRATCH]
+    push 32
+    pop r8
+    call .field
+    xchg eax, esi
+    mov rdi, [rbx + TLS_SCRATCH]
+    call parse_uint
+    test edx, edx
+    ret
+
+; Name field into scratch, lowercased in place (names are stored and compared
+; lowercased). Returns length in eax, ZF set when empty.
+.name_field:
+    mov edx, key_name
+    mov rcx, [rbx + TLS_SCRATCH]
+    push NAME_MAX - 1
+    pop r8
+    call .field
+    mov rdi, [rbx + TLS_SCRATCH]
+    xor ecx, ecx
+.lower:
+    cmp ecx, eax
+    jae .lower_done
+    mov dl, [rdi + rcx]
+    sub dl, 'A'
+    cmp dl, 'Z' - 'A'
+    ja .lower_next
+    or byte [rdi + rcx], 0x20
+.lower_next:
+    inc ecx
+    jmp .lower
+.lower_done:
+    test eax, eax
+    ret
+
+; Password field into the record scratch. Returns length, ZF set when empty.
+.pass_field:
+    mov edx, key_pass
+    mov rcx, [rbx + TLS_REC]
+    push PASS_MAX
+    pop r8
+    call .field
+    test eax, eax
+    ret
 
 .database_error:
     mov esi, database_error
@@ -870,29 +820,6 @@ _start:
 .append_done:
     ret
 
-; edi=parent index (<MAX_POSTS), rsi=destination (21 bytes); decimal plus NUL.
-; Leaf routine uses the red zone; clobbers caller-saved registers only.
-.utoa:
-    mov r9, rsp
-    mov eax, edi
-    push 10
-    pop r8
-    xor ecx, ecx
-.utoa_digit:
-    xor edx, edx
-    div r8d
-    add dl, '0'
-    dec r9
-    mov [r9], dl
-    inc ecx
-    test eax, eax
-    jnz .utoa_digit
-    mov rdi, rsi
-    mov rsi, r9
-    rep movsb
-    mov byte [rdi], 0
-    ret
-
 section .data
 align 8
 ignore_sigpipe: dq SIG_IGN, 0, 0, 0
@@ -911,7 +838,6 @@ thread_error_len equ $ - thread_error
 socket_error: db 'socket failed', 10
 socket_error_len equ $ - socket_error
 root_path: db '/', 0
-key_author: db 'a', 0
 key_title: db 't', 0
 key_body: db 'b', 0
 key_parent: db 'p', 0

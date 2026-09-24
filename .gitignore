@@ -1,7 +1,15 @@
-.slim/deepwork/
-geektaco.db
-geektaco.inv
-geektaco.key
+# build outputs
 *.o
 *.elf
+*.tmp
 geektaco
+geektaco.raw
+
+# runtime data (posts, invites, accounts, admin key)
+geektaco.db
+geektaco.inv
+geektaco.usr
+geektaco.key
+
+# local agent state
+.slim/

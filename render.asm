@@ -36,17 +36,50 @@ e_apos:  db '&#39;', 0
 
 %include "strtab.inc"
 
+; EMIT name, ... -- append strings by ID. Expands to `call emit` followed by
+; one ID byte per string, bit 7 set on the last; emit returns past it.
+; A name may also be an @field opcode (see FIELD_OPS): IDs from SID_COUNT up
+; emit a field of the caller's record in rbp or its index in r13.
+%macro EMIT 1-*
+        call    emit
+%rep %0 - 1
+        db      sid_%1
+%rotate 1
+%endrep
+        db      sid_%1 | 0x80
+%endmacro
+
+; Field opcodes, in ID order after the strings. Each op_X is a stub in the
+; field-op block below; field_ops holds their offsets from op_base.
+%define FIELD_OPS nreply, inv, parent, idx, author, title, date, body, code, reset, path, cookie, span_esc, span_md, url, item
+%macro field_ids 1-*
+%assign i 0
+%rep %0
+sid_@%1 equ SID_COUNT + i
+%assign i i + 1
+%rotate 1
+%endrep
+%if SID_COUNT + i > 0x80
+%error "string IDs and field opcodes must fit in 7 bits"
+%endif
+%endmacro
+%macro field_tab 1-*
+%rep %0
+        db      op_%1 - op_base
+        times   (op_%1 - op_base) / 256 * -1 db 0   ; error: op past byte range
+%rotate 1
+%endrep
+%endmacro
+field_ids FIELD_OPS
+field_ops: field_tab FIELD_OPS
+
+month_days: db 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
+
+; render_login/render_register message for error codes 1..5.
+auth_err: db sid_lg_e1, sid_rg_e2, sid_rg_e3, sid_rg_e4, sid_rg_e5
+
 section .text
 
-; ---------------------------------------------------------------------------
-; ob_reset() -- empty the output buffer.
-; args: none.  returns: nothing.  clobbers: nothing (writes TLS_OBLEN only).
-ob_reset:
-        push    rbx
-        mov     rbx, [fs:TLS_SELF]
-        mov     qword [rbx + TLS_OBLEN], 0
-        pop     rbx
-        ret
 
 ; ---------------------------------------------------------------------------
 ; ob_put(rdi=src, rsi=len) -- append raw bytes.
@@ -97,13 +130,9 @@ ob_puts:
         cmp     al, TOK_HI
         ja      .raw
         ; token: recurse into its dictionary entry
-        ; NASM folds `[sym + (rax-K)*2]` into a bogus (rax,rax) form and drops
-        ; the symbol, so compute the index explicitly.
-        sub     eax, TOK_LO
-        mov     edx, str_dict_off
-        movzx   eax, word [rdx + rax*2]
+        lea     edx, [rax - TOK_LO]
         mov     edi, str_dict
-        add     rdi, rax
+        call    nth
         call    ob_puts
         jmp     .next
 .raw:
@@ -113,6 +142,55 @@ ob_puts:
 .done:
         pop     r12
         pop     rbx
+        ret
+
+; ---------------------------------------------------------------------------
+; emit -- `call emit` followed by inline IDs (see EMIT). Each ID goes to
+; ob_putid; the byte with bit 7 set is the last one, and emit returns to the
+; instruction after it. The ID cursor lives on the stack, so field opcodes
+; see every register of the caller.
+; clobbers: rax, rdx, rdi, flags when every ID is a string (ob_put_md relies
+; on rcx surviving); caller-saved regs when a field opcode is used.
+emit:
+        pop     rax                     ; -> first ID
+.id:
+        movzx   edi, byte [rax]
+        inc     rax
+        push    rax
+        and     edi, 0x7f
+        call    ob_putid
+        pop     rax
+        test    byte [rax - 1], 0x80
+        jz      .id
+        jmp     rax                     ; return past the last ID
+
+; ob_putid(edi=string ID) -- ob_puts of string ID edi (s_* in ID order);
+; IDs from SID_COUNT run field opcode edi - SID_COUNT instead.
+; clobbers: caller-saved regs; preserves rbx, r12.
+ob_putid:
+        mov     edx, edi
+        cmp     edi, SID_COUNT
+        jae     .op
+        mov     edi, str_ids
+        call    nth
+        jmp     ob_puts
+.op:
+        movzx   eax, byte [rdx + field_ops - SID_COUNT]
+        add     eax, op_base
+        jmp     rax
+
+; nth(rdi=first of consecutive z-strings, edx=n) -> rdi = the n-th string.
+; clobbers: rax, rdx, flags.
+nth:
+        xor     eax, eax
+.skip:
+        dec     edx
+        js      .ret
+.nul:
+        scasb
+        jne     .nul
+        jmp     .skip
+.ret:
         ret
 
 ; ---------------------------------------------------------------------------
@@ -238,192 +316,169 @@ ob_put_esc_z:
         jmp     ob_put_esc
 
 ; ---------------------------------------------------------------------------
-; emit_head -- local helper: shared doctype/head/style so all pages match.
-; clobbers: caller-saved regs.
-; emit_200() -- reset the buffer and emit the 200 status line, the standard
-; headers, and the document head. Four page builders opened identically.
-; rbx must already hold the TLS base. clobbers: caller-saved regs.
-emit_200:
+; Field opcodes (EMIT @name). Records: rbp = post record (invite record for
+; @code), r13 = its index. Each stub clobbers caller-saved regs only.
+op_base:
+; ob_reset() -- empty the output buffer. Also EMIT @reset.
+; args: none.  returns: nothing.  clobbers: nothing (writes TLS_OBLEN only).
+ob_reset:
+op_reset:
+        push    rbx
+        mov     rbx, [fs:TLS_SELF]
         mov     qword [rbx + TLS_OBLEN], 0
-        mov     edi, s_200
-        call    ob_puts
-        mov     edi, s_hdr
-        call    ob_puts
-emit_head:
-        mov     edi, s_head
+        pop     rbx
+        ret
+op_path:                                ; r12 = z-string (redirect path,
+        mov     rdi, r12                ; cookie name): trusted, not user data
         jmp     ob_puts
-
-; ---------------------------------------------------------------------------
-; esc_field(rdi=NUL-padded field, rsi=capacity, rdx=fallback z-string)
-; Escapes the field; when the field is empty appends the fallback instead,
-; so links stay clickable and meta lines never render blank.
-; ef_a is the same with rax = field offset into the record at rdi.
-; clobbers: caller-saved regs.
-esc_field:
+op_cookie:                              ; r13/r14 = cookie value and length
+        mov     rdi, r13
+        mov     rsi, r14
+        jmp     ob_put
+; Markdown inline spans: rbx = text base, [rbp, r14) = span, r13 = URL start
+; and r12 - 1 = URL end (the ')' index).
+op_url:
+        lea     rdi, [rbx + r13]
+        lea     rsi, [r12 - 1]
+        sub     rsi, r13
+        jmp     ob_put_esc              ; url escaped too: quotes cannot break out
+op_item:                                ; ob_put_md: line r13 of length rcx,
+        lea     rdi, [rbx + r13 + 2]    ; minus its "> " / "- " marker
+        lea     rsi, [rcx - 2]
+        jmp     md_inline
+op_span_esc:
+        mov     eax, ob_put_esc         ; no inline processing inside
+        jmp     op_span
+op_span_md:
+        mov     eax, md_inline          ; nested inline markup
+op_span:
+        lea     rdi, [rbx + rbp]
+        mov     rsi, r14
+        sub     rsi, rbp
+        jmp     rax
+op_nreply:                              ; reply count of a root
+        mov     edi, [rbp + R_NREPLY]
+        jmp     op_u
+op_inv:                                 ; authoring user/invite
+        mov     edi, [rbp + R_INVITE]
+        jmp     op_u
+op_parent:                              ; thread root index
+        mov     edi, [rbp + R_PARENT]
+        jmp     op_u
+op_idx:                                 ; the record's own index
+        mov     rdi, r13
+op_u:
+        jmp     ob_putu
+op_date:
+        mov     edi, [rbp + R_TIME]
+        jmp     ob_putdate
+op_body:
+        lea     rdi, [rbp + R_BODY]
+        mov     esi, BODY_MAX
+        jmp     ob_put_md
+op_code:                                ; invite code, escaped: rendering it
+        lea     rdi, [rbp + I_CODE]     ; raw would make the admin panel a
+        push    CODE_LEN                ; stored-XSS sink the moment anything
+        pop     rsi                     ; upstream changes
+        jmp     ob_put_esc_z
+; Author / title, escaped; when the field is empty the "anon" / "(no subject)"
+; fallback is appended instead, so links stay clickable and meta lines never
+; render blank.
+op_author:
+        lea     rdi, [rbp + R_AUTHOR]
+        push    AUTHOR_MAX
+        pop     rsi
+        mov     dl, sid_anon
+        jmp     op_esc
+op_title:
+        lea     rdi, [rbp + R_TITLE]
+        push    TITLE_MAX
+        pop     rsi
+        mov     dl, sid_untitled
+op_esc:
         cmp     byte [rdi], 0
         jne     ob_put_esc_z
-        mov     rdi, rdx
-        jmp     ob_puts
-ef_a:
-        lea     rdi, [rdi + rax]
-        jmp     esc_field
+        movzx   edi, dl
+        jmp     ob_putid
 
 ; ---------------------------------------------------------------------------
 ; ob_putdate(edi=unix epoch seconds) -- "1999-12-31 23:59 UTC".
 ; A raw epoch integer is an unfinished-looking detail on a message board, and
 ; a board of this era always showed a readable date.
 ;
-; Uses Howard Hinnant's civil_from_days: shift the epoch to an era beginning
-; on 0000-03-01 so leap days land at the end of the cycle, then invert the
-; 146097-day/400-year and 1461-day/4-year cycles with integer arithmetic only.
-; No libc, no tables, no division by a non-constant.
-; clobbers: caller-saved regs; preserves rbx, r12-r14.
+; An unsigned 32-bit epoch spans 1970-01-01 .. 2106-02-07, so the date is
+; found by walking whole years and then months: at most 136 + 11 steps, no
+; division beyond splitting off the time of day. Within that span every year
+; divisible by 4 is a leap year except 2100.
+; clobbers: caller-saved regs; preserves rbx, r12-r15.
 ob_putdate:
-        push    rbx
-        push    rbp
         push    r12
-        push    r13
-        push    r14
-        mov     r14d, edi               ; epoch seconds (unsigned 32-bit)
-
-        mov     eax, r14d
+        mov     eax, edi
         xor     edx, edx
         mov     ecx, 86400
         div     ecx                     ; eax = days, edx = second of day
-        mov     r13d, edx               ; keep the time of day
-        mov     r12d, eax               ; days since 1970-01-01
-
-        ; --- civil_from_days ---------------------------------------------
-        add     r12d, 719468            ; shift epoch to 0000-03-01
-        mov     eax, r12d
-        xor     edx, edx
-        mov     ecx, 146097
-        div     ecx                     ; eax = era, edx = day of era
-        mov     r8d, eax                ; era
-        mov     r9d, edx                ; doe
-
-        ; yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365
-        mov     eax, r9d
-        xor     edx, edx
-        mov     ecx, 1460
-        div     ecx
-        mov     r10d, r9d
-        sub     r10d, eax
-        mov     eax, r9d
-        xor     edx, edx
-        mov     ecx, 36524
-        div     ecx
-        add     r10d, eax
-        mov     eax, r9d
-        xor     edx, edx
-        mov     ecx, 146096
-        div     ecx
-        sub     r10d, eax
-        mov     eax, r10d
-        xor     edx, edx
-        mov     ecx, 365
-        div     ecx
-        mov     r10d, eax               ; yoe
-
-        ; doy = doe - (365*yoe + yoe/4 - yoe/100)
-        imul    eax, r10d, 365
-        mov     r11d, eax
-        mov     eax, r10d
-        shr     eax, 2
-        add     r11d, eax
-        mov     eax, r10d
-        xor     edx, edx
-        mov     ecx, 100
-        div     ecx
-        sub     r11d, eax
-        mov     ecx, r9d
-        sub     ecx, r11d               ; ecx = doy
-
-        ; mp = (5*doy + 2)/153 ; d = doy - (153*mp+2)/5 + 1
-        imul    eax, ecx, 5
-        add     eax, 2
-        xor     edx, edx
-        mov     r11d, 153
-        div     r11d
-        mov     r11d, eax               ; mp
-        imul    eax, r11d, 153
-        add     eax, 2
-        xor     edx, edx
-        mov     esi, 5
-        div     esi
-        sub     ecx, eax
-        inc     ecx
-        mov     ebx, ecx                ; day -> rbx: ob_putu/ob_putc clobber
-                                        ; ecx, and the day is emitted last.
-
-        ; m = mp < 10 ? mp+3 : mp-9 ; y = yoe + era*400 + (m <= 2)
-        mov     eax, r11d
-        cmp     r11d, 10
-        jb      .m_early
-        sub     eax, 9
-        jmp     .m_done
-.m_early:
-        add     eax, 3
-.m_done:
-        mov     r11d, eax               ; month
-        imul    eax, r8d, 400
-        add     eax, r10d
-        cmp     r11d, 2
-        ja      .y_done
-        inc     eax                     ; Jan/Feb belong to the next year
-.y_done:
-        mov     r12d, eax               ; year  -> callee-saved
-        mov     r14d, r11d              ; month -> callee-saved
-
-        ; --- emit "YYYY-MM-DD HH:MM UTC" ---------------------------------
-        ; Every field lives in a callee-saved register: the emit helpers are
-        ; free to clobber the caller-saved set between fields.
-        ; Split the time of day before emitting so all five fields are live
-        ; in callee-saved registers and one loop can walk them.
-        mov     eax, r13d
-        xor     edx, edx
-        mov     ecx, 3600
-        div     ecx
-        mov     r13d, eax               ; hour
-        mov     eax, edx
-        xor     edx, edx
-        mov     ecx, 60
-        div     ecx
-        mov     ebp, eax                ; minute
-        ; Emit year, then four padded fields each preceded by its separator.
-        mov     edi, r12d
-        call    ob_putu
-        mov     r12d, s_dsep            ; "-- :"
-.dt_emit:
+        xchg    eax, edx
+        mov     esi, edx                ; days since 1970-01-01
+        push    60
+        pop     rcx
+        cdq                             ; second of day < 2^31: edx = 0
+        div     ecx                     ; eax = minute of day
+        cdq
+        div     ecx                     ; eax = hour, edx = minute
+        push    rdx                     ; the four padded fields, popped in
+        push    rax                     ; output order below: month, day,
+        mov     edi, 1970               ; hour, minute
+.year:
+        xor     ecx, ecx                ; ecx = 1 in a leap year
+        test    dil, 3
+        jnz     .ylen
+        cmp     edi, 2100
+        setne   cl
+.ylen:
+        lea     eax, [rcx + 365]
+        cmp     esi, eax
+        jb      .month0
+        sub     esi, eax
+        inc     edi
+        jmp     .year
+.month0:
+        xor     edx, edx                ; month - 1
+.month:
+        movzx   eax, byte [rdx + month_days]
+        cmp     edx, 1
+        jne     .mlen
+        add     eax, ecx                ; February
+.mlen:
+        cmp     esi, eax
+        jb      .mdone
+        sub     esi, eax
+        inc     edx
+        jmp     .month
+.mdone:
+        inc     esi                     ; day of month, 1-based
+        push    rsi
+        inc     edx
+        push    rdx
+        call    ob_putu                 ; year
+        mov     r12d, s_dsep            ; "-- :" precede the four fields
+.field:
         movzx   edi, byte [r12]
         call    ob_putc
-        mov     edi, r14d               ; month
-        mov     r14d, ebx               ; rotate: month<-day<-hour<-minute
-        mov     ebx, r13d
-        mov     r13d, ebp
-        call    .pad2
-        inc     r12
-        cmp     byte [r12], 0
-        jne     .dt_emit
-        mov     edi, s_utc
-        call    ob_puts
-        pop     r14
-        pop     r13
-        pop     r12
-        pop     rbp
-        pop     rbx
-        ret
-
-; .pad2(edi=value 0..99) -- two digits, zero padded.
-.pad2:
-        cmp     edi, 10
-        jae     .p2_wide
+        pop     rdi
+        cmp     edi, 10                 ; two digits, zero padded
+        jae     .wide
         push    rdi
         mov     dil, '0'
         call    ob_putc
         pop     rdi
-.p2_wide:
-        jmp     ob_putu
+.wide:
+        call    ob_putu
+        inc     r12
+        cmp     byte [r12], 0
+        jne     .field
+        pop     r12
+        EMIT    utc
+        ret
 
 ; ---------------------------------------------------------------------------
 ; Markdown rendering for post bodies.
@@ -483,14 +538,7 @@ md_inline:
         inc     r14
         jmp     .code_scan
 .code_hit:
-        mov     edi, s_md_cd
-        call    ob_puts
-        lea     rdi, [rbx + rbp]
-        mov     rsi, r14
-        sub     rsi, rbp
-        call    ob_put_esc              ; no inline processing inside code
-        mov     edi, s_md_cde
-        call    ob_puts
+        EMIT    md_cd, @span_esc, md_cde
         lea     r13, [r14 + 1]
         jmp     .loop
 
@@ -516,14 +564,7 @@ md_inline:
         inc     r14
         jmp     .st_scan
 .st_hit:
-        mov     edi, s_md_st
-        call    ob_puts
-        lea     rdi, [rbx + rbp]
-        mov     rsi, r14
-        sub     rsi, rbp
-        call    md_inline               ; nested inline inside strong
-        mov     edi, s_md_ste
-        call    ob_puts
+        EMIT    md_st, @span_md, md_ste
         lea     r13, [r14 + 2]
         jmp     .loop
 .em:
@@ -538,14 +579,7 @@ md_inline:
 .em_hit:
         cmp     r14, rbp
         je      .lit                    ; "**" with nothing between: literal
-        mov     edi, s_md_em
-        call    ob_puts
-        lea     rdi, [rbx + rbp]
-        mov     rsi, r14
-        sub     rsi, rbp
-        call    md_inline
-        mov     edi, s_md_eme
-        call    ob_puts
+        EMIT    md_em, @span_md, md_eme
         lea     r13, [r14 + 1]
         jmp     .loop
 
@@ -591,29 +625,13 @@ md_inline:
         pop     rdx
         test    eax, eax
         jz      .lit                    ; rejected: fall through to literal
-        ; rdx (the ')' index) and r8 (url start) are caller-saved and every
-        ; emit below clobbers them, so park the resume position in a
-        ; callee-saved register before emitting anything.
+        ; rdx (the ')' index) and r8 (url start) are caller-saved, so the
+        ; URL moves to callee-saved r13 (@url) and r12 (resume point) before
+        ; emitting anything. Link text is escaped, no nested markup.
         push    r12
         lea     r12, [rdx + 1]          ; resume just past ')'
-        push    r8
-        push    rdx
-        mov     edi, s_md_a1
-        call    ob_puts
-        pop     rdx
-        pop     r8
-        lea     rdi, [rbx + r8]
-        mov     rsi, rdx
-        sub     rsi, r8
-        call    ob_put_esc              ; url escaped too: quotes cannot break out
-        mov     edi, s_md_a2
-        call    ob_puts
-        lea     rdi, [rbx + rbp]
-        mov     rsi, r14
-        sub     rsi, rbp
-        call    ob_put_esc              ; link text: escaped, no nested markup
-        mov     edi, s_md_a3
-        call    ob_puts
+        mov     r13, r8
+        EMIT    md_a1, @url, md_a2, @span_esc, md_a3
         mov     r13, r12
         pop     r12
         jmp     .loop
@@ -722,8 +740,7 @@ ob_put_md:
         cmp     byte [rbx + r13 + 2], '`'
         jne     .not_fence
         call    .close_open
-        mov     edi, s_md_pre
-        call    ob_puts
+        EMIT    md_pre
         ; body runs from the line after the fence to a closing fence
         lea     r13, [rbp + 1]
 .fence_line:
@@ -758,8 +775,7 @@ ob_put_md:
 .fence_close:
         lea     r13, [rbp + 1]
 .fence_done:
-        mov     edi, s_md_pree
-        call    ob_puts
+        EMIT    md_pree
         jmp     .line
 .not_fence:
         ; ---- blank line ends a paragraph and a list
@@ -777,13 +793,7 @@ ob_put_md:
         cmp     byte [rbx + r13 + 1], ' '
         jne     .not_quote
         call    .close_open
-        mov     edi, s_md_bq
-        call    ob_puts
-        lea     rdi, [rbx + r13 + 2]
-        lea     rsi, [rcx - 2]
-        call    md_inline
-        mov     edi, s_md_bqe
-        call    ob_puts
+        EMIT    md_bq, @item, md_bqe
         lea     r13, [rbp + 1]
         jmp     .line
 .not_quote:
@@ -800,23 +810,15 @@ ob_put_md:
 .item:
         test    r15, r15
         jz      .item_nop
-        mov     edi, s_md_pe            ; a list ends any open paragraph
-        call    ob_puts
+        EMIT    md_pe           ; a list ends any open paragraph
         xor     r15d, r15d
 .item_nop:
         test    r14, r14
         jnz     .item_body
-        mov     edi, s_md_ul
-        call    ob_puts
+        EMIT    md_ul
         mov     r14d, 1
 .item_body:
-        mov     edi, s_md_li
-        call    ob_puts
-        lea     rdi, [rbx + r13 + 2]
-        lea     rsi, [rcx - 2]
-        call    md_inline
-        mov     edi, s_md_lie
-        call    ob_puts
+        EMIT    md_li, @item, md_lie ; rcx survives the string IDs before @item
         lea     r13, [rbp + 1]
         jmp     .line
 .para:
@@ -825,14 +827,12 @@ ob_put_md:
         ; multi-line posts do not collapse onto one line.
         test    r14, r14
         jz      .para_nolist
-        mov     edi, s_md_ule
-        call    ob_puts
+        EMIT    md_ule
         xor     r14d, r14d
 .para_nolist:
         test    r15, r15
         jnz     .para_cont
-        mov     edi, s_md_p
-        call    ob_puts
+        EMIT    md_p
         mov     r15d, 1
         jmp     .para_text
 .para_cont:
@@ -860,134 +860,94 @@ ob_put_md:
 .close_open:
         test    r15, r15
         jz      .co_list
-        mov     edi, s_md_pe
-        call    ob_puts
+        EMIT    md_pe
         xor     r15d, r15d
 .co_list:
         test    r14, r14
         jz      .co_done
-        mov     edi, s_md_ule
-        call    ob_puts
+        EMIT    md_ule
         xor     r14d, r14d
 .co_done:
         ret
 
 ; ---------------------------------------------------------------------------
-; emit_post(rdi=record) -- one <div class=p> block (meta line + pre body).
-; Emits s_h1b (h1 close + post div open) then the post body.
-; clobbers: caller-saved regs; preserves rbx.
+; emit_post(rdi=record) -- one post block: h1 close + meta line + body.
+; clobbers: caller-saved regs; preserves rbx, rbp.
 emit_post:
-        push    rbx
-        mov     rbx, rdi
-        mov     edi, s_h1b            ; </h1><div class=p><div class=m>
-        call    ob_puts
-        mov     eax, R_AUTHOR
-        push    AUTHOR_MAX
-        pop     rsi
-        lea     rdx, [s_anon]
-        mov     rdi, rbx
-        call    ef_a
-        mov     edi, s_dot            ; middle dot
-        call    ob_puts
-        mov     edi, [rbx + R_TIME]
-        call    ob_putdate
-        mov     edi, s_post_c         ; </div><pre>
-        call    ob_puts
-        lea     rdi, [rbx + R_BODY]
-        mov     esi, BODY_MAX
-        call    ob_put_md
-        mov     edi, s_post_d         ; </pre></div>
-        call    ob_puts
-        pop     rbx
+        push    rbp
+        mov     rbp, rdi
+        EMIT    h1b, @author, dot, @date, post_c, @body, post_d
+        pop     rbp
         ret
 
 ; ---------------------------------------------------------------------------
-; emit_nav(rdi=page, rsi=more flag, rdx=prefix z-string, rcx=thread index)
-; Emits "newer . page N . older", omitting whichever link does not exist.
-; rdx is "/p/" for the index or "/t/" for a thread; when it is "/t/" the
-; thread index in rcx is emitted before the page segment. Page 0 canonicalises
-; to "/" or "/t/<n>" so the first page never has two URLs.
-; clobbers: caller-saved regs; preserves rbx, r12-r15.
+; emit_nav(ecx=thread index, or -1 for the index page) -- rbx = TLS base.
+; Emits "newer . page N . older" for TLS_PAGE / TLS_MORE, omitting whichever
+; link does not exist. Index links are "/p/<n>"; thread links are
+; "/t/<ecx>/<n>". Page 0 canonicalises to "/" or "/t/<ecx>" so the first page
+; never has two URLs.
+; clobbers: caller-saved regs; preserves rbx, rbp, r12-r15.
 emit_nav:
-        push    rbx
         push    r12
         push    r13
         push    r14
         push    r15
-        mov     r12, rdi                ; page
-        mov     r13, rsi                ; more?
-        mov     r14, rdx                ; prefix
-        mov     r15, rcx                ; thread index (only for "/t/")
-        test    r12, r12
-        jnz     .has_newer
-        test    r13, r13
+        mov     r12, [rbx + TLS_PAGE]
+        mov     r14, [rbx + TLS_MORE]
+        mov     r15d, ecx               ; thread index; sign set: index page
+        lea     r13, [r12 + 1]          ; 1-based page for a human reader
+        mov     rax, r12
+        or      rax, r14
         jz      .none                   ; single page: no nav at all
-.has_newer:
-        mov     edi, s_nv_a
-        call    ob_puts
+        EMIT    nv_a
         test    r12, r12
         jz      .page_no                ; page 0 has nothing newer
-        mov     edi, s_nv_nw          ; <a href="
-        call    ob_puts
         lea     rdi, [r12 - 1]
         call    .href
-        mov     edi, s_nv_nwt         ; ">newer</a>
-        call    ob_puts
+        EMIT    nv_nwt          ; ">newer</a>
 .page_no:
-        mov     edi, s_nv_pg
-        call    ob_puts
-        lea     rdi, [r12 + 1]          ; 1-based for a human reader
-        call    ob_putu
-        mov     edi, s_nv_pge
-        call    ob_puts
-        test    r13, r13
-        jz      .close
-        mov     edi, s_nv_nw
-        call    ob_puts
-        lea     rdi, [r12 + 1]
+        EMIT    nv_pg, @idx, nv_pge
+        test    r14, r14
+        jz      .none
+        mov     rdi, r13
         call    .href
-        mov     edi, s_nv_odt         ; ">older</a>
-        call    ob_puts
-.close:
+        EMIT    nv_odt          ; ">older</a>
 .none:
         pop     r15
         pop     r14
         pop     r13
         pop     r12
-        pop     rbx
         ret
 
-; .href(rdi=target page) -- writes the URL for that page using r14/r15.
+; .href(rdi=target page) -- '<a href="' and the URL for that page, using r15.
 .href:
         push    rbp
         mov     rbp, rdi                ; target page
-        cmp     r14d, s_pfx_t
-        jne     .h_index
-        mov     edi, s_pfx_t          ; /t/
-        call    ob_puts
-        mov     rdi, r15
-        call    ob_putu                 ; /t/<root>
-        test    rbp, rbp
-        jz      .h_done                 ; page 0 is bare /t/<root>
-        mov     edi, s_slash
-        call    ob_puts
-        mov     rdi, rbp
+        EMIT    nv_nw           ; <a href="
+        push    sid_pfx_p
+        pop     rdi
+        test    r15d, r15d
+        js      .h_page
+        EMIT    pfx_t           ; /t/<root>
+        mov     edi, r15d
         call    ob_putu
-        jmp     .h_done
-.h_index:
+        push    sid_slash
+        pop     rdi
         test    rbp, rbp
         jnz     .h_num
-        mov     edi, s_slash          ; page 0 is bare /
-        call    ob_puts
-        jmp     .h_done
-.h_num:
-        mov     edi, s_pfx_p          ; /p/<n>
-        call    ob_puts
-        mov     rdi, rbp
-        call    ob_putu
-.h_done:
-        pop     rbp
+        pop     rbp                     ; page 0 is bare /t/<root>
         ret
+.h_page:
+        test    rbp, rbp
+        jnz     .h_num
+        pop     rbp                     ; index page 0 is bare /
+        mov     dil, sid_slash
+        jmp     ob_putid
+.h_num:
+        call    ob_putid                ; /p/<n> or /t/<root>/<n>
+        mov     rdi, rbp
+        pop     rbp
+        jmp     ob_putu
 
 ; ---------------------------------------------------------------------------
 ; render_index() -- 200 page listing every thread root, newest first.
@@ -1006,15 +966,13 @@ render_index:
         ; every register is already spoken for by the scan.
         mov     [rbx + TLS_PAGE], rdi   ; requested page
         mov     qword [rbx + TLS_MORE], 0
-        call    emit_200
-        mov     edi, s_idx_top
-        call    ob_puts
+        EMIT    @reset, 200, hdr, head, idx_top
         call    db_count
         mov     r12, rax                ; snapshot of the allocation cursor
         test    r12, r12
         jz      .empty
-        mov     edi, s_ul_a             ; <ul> wraps rows only, never the
-        call    ob_puts                 ; empty-state paragraph
+        EMIT    ul_a            ; <ul> wraps rows only, never the
+                                ; empty-state paragraph
         mov     r13, r12                ; i runs r12-1 .. 0: newest first
         xor     r14d, r14d              ; matching roots seen so far
         xor     r15d, r15d              ; roots emitted on this page
@@ -1038,32 +996,8 @@ render_index:
         inc     r14
         cmp     r14, rax
         jbe     .next                   ; still ahead of this page's first row
-        mov     edi, s_th_a           ; <div class=t><a href="/t/
-        call    ob_puts
-        mov     rdi, r13
-        call    ob_putu                 ; ...N
-        mov     edi, s_th_b           ; ">
-        call    ob_puts
-        mov     eax, R_TITLE
-        push    TITLE_MAX
-        pop     rsi
-        lea     rdx, [s_untitled]
-        mov     rdi, rbp
-        call    ef_a                    ; escaped title
-        mov     edi, s_th_c           ; </a><div class=m>by
-        call    ob_puts
-        mov     eax, R_AUTHOR
-        push    AUTHOR_MAX
-        pop     rsi
-        lea     rdx, [s_anon]
-        mov     rdi, rbp
-        call    ef_a                    ; escaped author
-        mov     edi, s_dot            ; middle dot
-        call    ob_puts
-        mov     edi, [rbp + R_NREPLY]   ; denormalised count: no rescan
-        call    ob_putu
-        mov     edi, s_th_e           ; replies</div></div>
-        call    ob_puts
+        ; the reply count is denormalised: no rescan
+        EMIT    th_a, @idx, th_b, @title, th_c, @author, dot, @nreply, th_e
         inc     r15
         cmp     r15, PAGE_SIZE_N
         jb      .next
@@ -1076,24 +1010,18 @@ render_index:
         jnz     .outer                  ; stop after index 0 was processed
         jmp     .listend
 .empty:
-        mov     edi, s_empty
-        call    ob_puts
+        EMIT    empty
         jmp     .form
 .listend:
-        mov     edi, s_ul_b             ; </ul>
-        call    ob_puts
+        EMIT    ul_b            ; </ul>
 .form:
-        mov     rdi, [rbx + TLS_PAGE]
-        mov     rsi, [rbx + TLS_MORE]
-        mov     edx, s_pfx_p
-        xor     ecx, ecx
+        or      ecx, -1                 ; index links
         call    emit_nav
         ; Signed in: name the account and offer sign-out. Signed out: offer
         ; the two ways in. The nav is the only place identity is visible.
         cmp     qword [rbx + TLS_USER], 0
         jl      .anon_nav
-        mov     edi, s_who
-        call    ob_puts
+        EMIT    who
         mov     rdi, [rbx + TLS_USER]
         call    usr_rec
         test    rax, rax
@@ -1102,29 +1030,19 @@ render_index:
         push    NAME_MAX
         pop     rsi
         call    ob_put_esc_z
-        mov     edi, s_lg_out
-        call    ob_puts
+        EMIT    lg_out
         jmp     .nav_out
 .anon_nav:
-        mov     edi, s_nav
-        call    ob_puts
+        EMIT    nav
 .nav_out:
-        mov     edi, s_newform
-        call    ob_puts
-        mov     edi, s_f_a
-        call    ob_puts
-        mov     edi, s_newform2
-        call    ob_puts
-        mov     edi, s_f_b
-        call    ob_puts
-        mov     edi, s_newform3
+        EMIT    newform, f_a, newform2, f_b, newform3
         pop     r15
         pop     r14
         pop     r13
         pop     r12
         pop     rbp
         pop     rbx
-        jmp     ob_puts
+        ret
 
 ; ---------------------------------------------------------------------------
 ; render_thread(rdi=root index) -- 200 page: root post + replies ascending.
@@ -1150,20 +1068,12 @@ render_thread:
         je      .notfound               ; reserved root is not yet visible
         test    byte [rax + R_FLAGS], FLAG_DELETED
         jnz     .notfound               ; a deleted thread reads as gone
-        mov     r13, rax                ; direct root pointer until reply scan
-        cmp     dword [r13 + R_PARENT], r12d ; must be a root record
+        mov     rbp, rax                ; direct root pointer until reply scan
+        cmp     dword [rbp + R_PARENT], r12d ; must be a root record
         jne     .notfound
-        call    emit_200
-        mov     edi, s_t_top          ; header + <h1>
-        call    ob_puts
-        mov     eax, R_TITLE
-        push    TITLE_MAX
-        pop     rsi
-        lea     rdx, [s_untitled]
-        mov     rdi, r13
-        call    ef_a                    ; escaped title
-        ; -- root post (emit_post emits s_h1b = h1 close + post div open)
-        mov     rdi, r13
+        EMIT    @reset, 200, hdr, head, t_top, @title   ; header + <h2>title
+        ; -- root post (emit_post closes the heading first)
+        mov     rdi, rbp
         call    emit_post
         ; -- replies: j in 0..db_count-1, parent == root, j != root
         call    db_count
@@ -1202,23 +1112,10 @@ render_thread:
         cmp     r13, r14
         jb      .rep
 .repdone:
-        mov     rdi, [rbx + TLS_PAGE]
-        mov     rsi, [rbx + TLS_MORE]
-        mov     edx, s_pfx_t
-        mov     rcx, r12                ; thread index for the URL
+        mov     ecx, r12d               ; thread links
         call    emit_nav
-        mov     edi, s_repl_a         ; form + hidden p=
-        call    ob_puts
-        mov     rdi, r12
-        call    ob_putu                 ; value=N
-        mov     edi, s_th_b           ; ">" closes the hidden input
-        call    ob_puts
-        mov     edi, s_f_a
-        call    ob_puts
-        mov     edi, s_f_b
-        call    ob_puts
-        mov     edi, s_repl_b
-        call    ob_puts
+        mov     r13, r12                ; hidden p=<root index>
+        EMIT    repl_a, @idx, th_b, f_a, f_b, repl_b
 .out:
         pop     r15
         pop     r14
@@ -1235,322 +1132,72 @@ render_thread:
 ; render_404() -- minimal 404 response.
 ; clobbers: caller-saved regs.
 render_404:
-        push    rbx
-        mov     rbx, [fs:TLS_SELF]
-        mov     qword [rbx + TLS_OBLEN], 0
-        mov     edi, s_404a
-        call    ob_puts
-        mov     edi, s_hdr
-        call    ob_puts
-        call    emit_head
-        mov     edi, s_404body
-        pop     rbx
-        jmp     ob_puts
+        EMIT    @reset, 404a, hdr, head, 404body
+        ret
 
 ; ---------------------------------------------------------------------------
 ; render_redirect(rdi=NUL-terminated location path) -- 302 response.
-; clobbers: caller-saved regs; preserves rbx.
+; clobbers: caller-saved regs.
 render_redirect:
-        push    rbx
         push    r12
         mov     r12, rdi                ; path
-        mov     rbx, [fs:TLS_SELF]
-        mov     qword [rbx + TLS_OBLEN], 0
-        mov     edi, s_302a           ; status + "Location: "
-        call    ob_puts
-        mov     rdi, r12
-        call    ob_puts                 ; path
-        mov     edi, s_crlf           ; CRLF
-        call    ob_puts
-        mov     edi, s_hdr            ; headers + blank line
-        call    ob_puts
-        mov     edi, s_red_a          ; tiny body: <p>moved: <a href="
-        call    ob_puts
-        mov     rdi, r12
-        call    ob_puts
-        mov     edi, s_th_b           ; ">
-        call    ob_puts
-        mov     rdi, r12
-        call    ob_puts
-        mov     edi, s_red_c          ; </a></p>
+        EMIT    @reset, 302a, @path, crlf, hdr, red_a, @path, th_b, @path, red_c
         pop     r12
-        pop     rbx
-        jmp     ob_puts
+        ret
 
 ; ---------------------------------------------------------------------------
 ; render_403() -- posting requires an invite.
 ; clobbers: caller-saved regs; preserves rbx.
 render_403:
-        push    rbx
-        mov     rbx, [fs:TLS_SELF]
-        mov     qword [rbx + TLS_OBLEN], 0
-        mov     edi, s_403a
-        call    ob_puts
-        mov     edi, s_hdr
-        call    ob_puts
-        call    emit_head
-        mov     edi, s_403body
-        pop     rbx
-        jmp     ob_puts
+        EMIT    @reset, 403a, hdr, head, 403body
+        ret
 
 ; ---------------------------------------------------------------------------
 ; render_login(rdi=error code)  /  render_register(rdi=error code)
 ; 0 renders clean; 1..5 select a message. Both share one body: the only
-; difference is which heading and form are emitted, so they fall through into
-; a common tail rather than duplicating the response prologue.
+; difference is which heading and form are emitted, so the entry points load
+; that ID pair (heading in bits 0-7, form in bits 8-15) and share the rest.
 ; clobbers: caller-saved; preserves rbx, r12, r13.
 render_login:
-        push    rbx
-        push    r12
-        push    r13
-        mov     r12, rdi
-        mov     r13d, 1                 ; login flavour
+        mov     esi, sid_lg_a | sid_lg_b << 8
         jmp     render_auth_page
 render_register:
-        push    rbx
+        mov     esi, sid_rg_a | sid_rg_b << 8
+render_auth_page:
         push    r12
         push    r13
-        mov     r12, rdi
-        xor     r13d, r13d              ; register flavour
-render_auth_page:
-        mov     rbx, [fs:TLS_SELF]
-        call    emit_200
-        test    r13d, r13d
-        jz      .reg_head
-        mov     edi, s_lg_a
-        jmp     .head_done
-.reg_head:
-        mov     edi, s_rg_a
-.head_done:
-        call    ob_puts
-        ; error line, if any
+        mov     r12, rdi                ; error code
+        mov     r13d, esi               ; heading / form IDs
+        EMIT    @reset, 200, hdr, head
+        movzx   edi, r13b
+        call    ob_putid                ; heading
         test    r12, r12
         jz      .form
-        cmp     r12, 1
-        je      .e1
-        cmp     r12, 2
-        je      .e2
-        cmp     r12, 3
-        je      .e3
-        cmp     r12, 4
-        je      .e4
-        mov     edi, s_rg_e5
-        jmp     .emit_err
-.e1:
-        mov     edi, s_lg_e1
-        jmp     .emit_err
-.e2:
-        mov     edi, s_rg_e2
-        jmp     .emit_err
-.e3:
-        mov     edi, s_rg_e3
-        jmp     .emit_err
-.e4:
-        mov     edi, s_rg_e4
-.emit_err:
-        call    ob_puts
+        movzx   edi, byte [r12 + auth_err - 1]
+        call    ob_putid                ; error line
 .form:
-        test    r13d, r13d
-        jz      .reg_form
-        mov     edi, s_lg_b
-        jmp     .form_done
-.reg_form:
-        mov     edi, s_rg_b
-.form_done:
+        shr     r13d, 8
+        mov     edi, r13d
         pop     r13
         pop     r12
-        pop     rbx
-        jmp     ob_puts
+        jmp     ob_putid                ; form
 
 ; ---------------------------------------------------------------------------
 ; render_head_cookie(rdi=cookie name z-string, rsi=value, rdx=value length)
 ; 200 response that installs the session cookie, plus a short confirmation.
 ; The value is emitted by length, not assumed NUL-terminated.
-; clobbers: caller-saved regs; preserves rbx, r12-r14.
+; clobbers: caller-saved regs.
 render_head_cookie:
-        push    rbx
         push    r12
         push    r13
         push    r14
         mov     r12, rdi                ; name
         mov     r13, rsi                ; value
         mov     r14, rdx                ; value length
-        mov     rbx, [fs:TLS_SELF]
-        mov     qword [rbx + TLS_OBLEN], 0
-        mov     edi, s_200
-        call    ob_puts
-        mov     edi, s_ck_a           ; "Set-Cookie: "
-        call    ob_puts
-        mov     rdi, r12
-        call    ob_puts
-        mov     edi, s_ck_b           ; "="
-        call    ob_puts
-        mov     rdi, r13
-        mov     rsi, r14
-        call    ob_put
-        mov     edi, s_ck_c           ; attributes + CRLF
-        call    ob_puts
-        mov     edi, s_hdr
-        call    ob_puts
-        call    emit_head
-        mov     edi, s_joined
+        EMIT    @reset, 200, ck_a, @path, ck_b, @cookie, ck_c, hdr, head, joined
         pop     r14
         pop     r13
         pop     r12
-        pop     rbx
-        jmp     ob_puts
-
-; ---------------------------------------------------------------------------
-; emit_stats() -- summary table above the admin panel's two lists.
-; One pass per mapping; db_rec is called once per index, never twice.
-; Counters live in TLS_SCRATCH because there are more of them than there are
-; free callee-saved registers, and a .bss array would be shared by 4 threads.
-;   scratch qword 0..5  slots, committed, holes, deleted, roots, replies
-;   scratch qword 6..9  invites, unused, redeemed, revoked
-; clobbers: caller-saved regs; preserves rbx, rbp, r12-r15.
-emit_stats:
-        push    rbx
-        push    rbp
-        push    r12
-        push    r13
-        push    r14
-        mov     rbx, [fs:TLS_SELF]
-        mov     r14, [rbx + TLS_SCRATCH]
-        xor     eax, eax
-        mov     ecx, 10
-        mov     rdi, r14
-        rep     stosq                   ; zero all ten counters
-
-        call    db_count
-        mov     r12, rax
-        mov     [r14], rax              ; slots = the cursor itself
-        xor     r13d, r13d
-.post:
-        cmp     r13, r12
-        jae     .posts_done
-        mov     rdi, r13
-        call    db_rec
-        test    rax, rax
-        jz      .posts_done             ; null means past the cursor: stop
-        mov     rbp, rax
-        cmp     dword [rbp + R_TIME], 0
-        jne     .committed
-        inc     qword [r14 + 16]        ; uncommitted hole
-        jmp     .post_next
-.committed:
-        inc     qword [r14 + 8]
-        test    byte [rbp + R_FLAGS], FLAG_DELETED
-        jz      .not_del
-        inc     qword [r14 + 24]
-        jmp     .post_next              ; deleted rows are not counted as live
-.not_del:
-        cmp     dword [rbp + R_PARENT], r13d
-        jne     .is_reply
-        inc     qword [r14 + 32]        ; root
-        jmp     .post_next
-.is_reply:
-        inc     qword [r14 + 40]
-.post_next:
-        inc     r13
-        jmp     .post
-.posts_done:
-
-        call    inv_count
-        mov     r12, rax
-        xor     r13d, r13d
-.inv:
-        cmp     r13, r12
-        jae     .inv_done
-        mov     rdi, r13
-        call    inv_rec
-        test    rax, rax
-        jz      .inv_done
-        mov     rbp, rax
-        cmp     dword [rbp + I_TIME], 0
-        je      .inv_next               ; reserved, no code written yet
-        inc     qword [r14 + 48]
-        test    byte [rbp + I_FLAGS], INV_FLAG_REVOKED
-        jz      .inv_live
-        inc     qword [r14 + 72]
-        jmp     .inv_next
-.inv_live:
-        cmp     dword [rbp + I_USED], 0
-        jne     .inv_used
-        inc     qword [r14 + 56]
-        jmp     .inv_next
-.inv_used:
-        inc     qword [r14 + 64]
-.inv_next:
-        inc     r13
-        jmp     .inv
-.inv_done:
-
-        mov     edi, s_st_a
-        call    ob_puts
-        mov     edi, s_l_slot
-        mov     rsi, [r14]
-        call    .row
-        ; The ten labels are consecutive NUL-terminated strings and the ten
-        ; counters are consecutive qwords, so one loop walks both in step.
-        ; Unrolled this was ten 13-byte blocks.
-        mov     r12d, s_l_live          ; -> next label
-        lea     r13, [r14 + 8]          ; -> next counter
-.stat_row:
-        mov     rsi, [r13]
-        mov     edi, r12d
-        cmp     r12d, s_l_hole
-        jne     .stat_plain
-        test    rsi, rsi
-        jz      .stat_plain
-        call    .row_warn               ; the one diagnostic number
-        jmp     .stat_next
-.stat_plain:
-        call    .row
-.stat_next:
-        add     r13, 8
-.stat_skip:                             ; advance past this label's NUL
-        cmp     byte [r12], 0
-        lea     r12, [r12 + 1]
-        jne     .stat_skip
-        cmp     r12d, s_l_end
-        jb      .stat_row
-        mov     edi, s_st_z
-        call    ob_puts
-        pop     r14
-        pop     r13
-        pop     r12
-        pop     rbp
-        pop     rbx
-        ret
-
-; .row(rdi=label z-string, rsi=value) -- one label/value pair.
-.row:
-        push    r15
-        mov     r15, rsi
-        push    rdi
-        mov     edi, s_st_r
-        call    ob_puts
-        pop     rdi
-        call    ob_puts
-        mov     edi, s_st_v
-        call    ob_puts
-        mov     rdi, r15
-        call    ob_putu
-        pop     r15
-        ret
-.row_warn:
-        push    r15
-        mov     r15, rsi
-        push    rdi
-        mov     edi, s_st_r
-        call    ob_puts
-        pop     rdi
-        call    ob_puts
-        mov     edi, s_st_warn
-        call    ob_puts
-        mov     rdi, r15
-        call    ob_putu
-        pop     r15
         ret
 
 ; ---------------------------------------------------------------------------
@@ -1566,12 +1213,112 @@ render_admin:
         push    r14
         push    r15
         mov     rbx, [fs:TLS_SELF]
-        call    emit_200
-        mov     edi, s_adm_hdr
-        call    ob_puts
-        call    emit_stats
-        mov     edi, s_adm_top
-        call    ob_puts
+        EMIT    @reset, 200, hdr, head, adm_hdr
+
+        ; ---- stats: summary table above the two lists.
+        ; One pass per mapping; db_rec is called once per index, never twice.
+        ; Counters live in TLS_SCRATCH because there are more of them than
+        ; there are free callee-saved registers, and a .bss array would be
+        ; shared by 4 threads.
+        ;   scratch qword 0..5  slots, committed, holes, deleted, roots, replies
+        ;   scratch qword 6..9  invites, unused, redeemed, revoked
+        mov     r14, [rbx + TLS_SCRATCH]
+        xor     eax, eax
+        mov     ecx, 10
+        mov     rdi, r14
+        rep     stosq                   ; zero all ten counters
+
+        call    db_count
+        mov     r12, rax
+        mov     [r14], rax              ; slots = the cursor itself
+        xor     r13d, r13d
+.sp:
+        cmp     r13, r12
+        jae     .sps_done
+        mov     rdi, r13
+        call    db_rec
+        test    rax, rax
+        jz      .sps_done             ; null means past the cursor: stop
+        mov     rbp, rax
+        cmp     dword [rbp + R_TIME], 0
+        jne     .s_committed
+        inc     qword [r14 + 16]        ; uncommitted hole
+        jmp     .sp_next
+.s_committed:
+        inc     qword [r14 + 8]
+        test    byte [rbp + R_FLAGS], FLAG_DELETED
+        jz      .s_not_del
+        inc     qword [r14 + 24]
+        jmp     .sp_next              ; deleted rows are not counted as live
+.s_not_del:
+        cmp     dword [rbp + R_PARENT], r13d
+        jne     .s_is_reply
+        inc     qword [r14 + 32]        ; root
+        jmp     .sp_next
+.s_is_reply:
+        inc     qword [r14 + 40]
+.sp_next:
+        inc     r13
+        jmp     .sp
+.sps_done:
+
+        call    inv_count
+        mov     r12, rax
+        xor     r13d, r13d
+.si:
+        cmp     r13, r12
+        jae     .si_done
+        mov     rdi, r13
+        call    inv_rec
+        test    rax, rax
+        jz      .si_done
+        mov     rbp, rax
+        cmp     dword [rbp + I_TIME], 0
+        je      .si_next               ; reserved, no code written yet
+        inc     qword [r14 + 48]
+        test    byte [rbp + I_FLAGS], INV_FLAG_REVOKED
+        jz      .si_live
+        inc     qword [r14 + 72]
+        jmp     .si_next
+.si_live:
+        cmp     dword [rbp + I_USED], 0
+        jne     .si_used
+        inc     qword [r14 + 56]
+        jmp     .si_next
+.si_used:
+        inc     qword [r14 + 64]
+.si_next:
+        inc     r13
+        jmp     .si
+.si_done:
+
+        ; The ten labels have consecutive string IDs and the ten counters
+        ; are consecutive qwords, so one loop walks both in step.
+%if sid_l_end - sid_l_slot != 10
+%error "stats labels must have consecutive string IDs"
+%endif
+        EMIT    st_a
+        mov     r12d, sid_l_slot        ; label ID
+        mov     r13, r14                ; -> counter
+.st_row:
+        EMIT    st_r
+        mov     edi, r12d
+        call    ob_putid
+        mov     edi, sid_st_v
+        cmp     r12b, sid_l_hole
+        jne     .st_v
+        cmp     qword [r13], 0
+        je      .st_v
+        mov     edi, sid_st_warn        ; the one diagnostic number
+.st_v:
+        call    ob_putid
+        mov     rdi, [r13]
+        call    ob_putu
+        add     r13, 8
+        inc     r12d
+        cmp     r12b, sid_l_end
+        jb      .st_row
+        EMIT    st_z, adm_top
 
         ; ---- invites, ascending
         call    inv_count
@@ -1587,51 +1334,29 @@ render_admin:
         cmp     dword [rax + I_TIME], 0
         je      .inv_next               ; reserved slot, no code written yet
         mov     rbp, rax
-        mov     edi, s_adm_inv        ; <tr><td>
-        call    ob_puts
-        mov     rdi, r13
-        call    ob_putu                 ; index
-        mov     edi, s_adm_td
-        call    ob_puts
-        ; The code is hex today, but rendering it raw would make this panel a
-        ; stored-XSS sink the moment anything upstream changes.
-        lea     rdi, [rbp + I_CODE]
-        push    CODE_LEN
-        pop     rsi
-        call    ob_put_esc_z
-        mov     edi, s_adm_td
-        call    ob_puts
+        EMIT    adm_inv, @idx, adm_td, @code, adm_td
         ; status: revoked > used > unused
         test    byte [rbp + I_FLAGS], INV_FLAG_REVOKED
         jz      .inv_used
-        mov     edi, s_st_rev
-        call    ob_puts
+        EMIT    st_rev
         jmp     .inv_next
 .inv_used:
         mov     r14d, [rbp + I_USED]
         test    r14d, r14d
         jnz     .inv_usedby
-        mov     edi, s_st_free
-        call    ob_puts
+        EMIT    st_free
         jmp     .inv_btn
 .inv_usedby:
-        mov     edi, s_st_used
-        call    ob_puts
+        EMIT    st_used
         lea     rdi, [r14 - 1]          ; field stores 1 + post index
         call    ob_putu
 .inv_btn:
-        mov     edi, s_adm_rev
-        call    ob_puts
-        mov     rdi, r13
-        call    ob_putu
-        mov     edi, s_adm_revb
-        call    ob_puts
+        EMIT    adm_rev, @idx, adm_revb
 .inv_next:
         inc     r13
         jmp     .inv
 .inv_done:
-        mov     edi, s_adm_mid          ; </table><h1>posts</h1><table>
-        call    ob_puts
+        EMIT    adm_mid         ; </table><h2>$ messages</h2><table>
 
         ; ---- posts, newest first
         call    db_count
@@ -1646,74 +1371,36 @@ render_admin:
         test    rax, rax
         jz      .post_next
         mov     rbp, rax
-        mov     edi, s_adm_inv
-        call    ob_puts
-        mov     rdi, r13
-        call    ob_putu                 ; index
-        mov     edi, s_adm_td
-        call    ob_puts
+        EMIT    adm_inv, @idx, adm_td
         cmp     dword [rbp + R_TIME], 0
         jne     .post_live
-        mov     edi, s_st_unc           ; reserved but never published
-        call    ob_puts
+        EMIT    st_unc          ; reserved but never published
         jmp     .post_next
 .post_live:
-        mov     eax, R_AUTHOR
-        push    AUTHOR_MAX
-        pop     rsi
-        lea     rdx, [s_anon]
-        mov     rdi, rbp
-        call    ef_a
-        mov     edi, s_adm_td
-        call    ob_puts
+        EMIT    @author, adm_td
         cmp     dword [rbp + R_PARENT], r13d
         je      .post_root
-        mov     edi, s_reply_to         ; "(reply to N)"
-        call    ob_puts
-        mov     edi, [rbp + R_PARENT]
-        call    ob_putu
-        mov     edi, s_paren
-        call    ob_puts
+        EMIT    reply_to, @parent, paren
         jmp     .post_inv
 .post_root:
-        mov     eax, R_TITLE
-        push    TITLE_MAX
-        pop     rsi
-        lea     rdx, [s_untitled]
-        mov     rdi, rbp
-        call    ef_a
+        EMIT    @title
 .post_inv:
-        mov     edi, s_adm_td
-        call    ob_puts
-        mov     edi, s_inv_col
-        call    ob_puts
-        mov     edi, [rbp + R_INVITE]
-        call    ob_putu                 ; authoring invite
-        mov     edi, s_adm_td
-        call    ob_puts
+        EMIT    adm_td, inv_col, @inv, adm_td
         test    byte [rbp + R_FLAGS], FLAG_DELETED
         jz      .post_btn
-        mov     edi, s_st_del
-        call    ob_puts
+        EMIT    st_del
         jmp     .post_next
 .post_btn:
-        mov     edi, s_st_ok
-        call    ob_puts
-        mov     edi, s_adm_del
-        call    ob_puts
-        mov     rdi, r13
-        call    ob_putu
-        mov     edi, s_adm_delb
-        call    ob_puts
+        EMIT    st_ok, adm_del, @idx, adm_delb
 .post_next:
         test    r13, r13
         jnz     .post
 .done:
-        mov     edi, s_adm_end
+        EMIT    adm_end
         pop     r15
         pop     r14
         pop     r13
         pop     r12
         pop     rbp
         pop     rbx
-        jmp     ob_puts
+        ret

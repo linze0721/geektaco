@@ -24,7 +24,8 @@ http_parse:
     pop rcx
     rep stosq                      ; Clear the five contiguous pointer/length slots.
     mov rdi, rbx
-    mov eax, M_OTHER
+    push M_OTHER
+    pop rax
     mov [rbp+TLS_METHOD], rax
 
     cmp rsi, 4
@@ -41,7 +42,8 @@ http_parse:
     jne .find_space
     cmp byte [rdi+4], ' '
     jne .find_space
-    mov eax, M_POST
+    push M_POST
+    pop rax
     mov [rbp+TLS_METHOD], rax
 
 .find_space:

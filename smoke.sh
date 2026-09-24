@@ -1,15 +1,18 @@
 #!/bin/sh
-# geektaco v2 smoke test: threads, invites, admin, persistence.
-# Exercises the real binary over real HTTP. No mocks.
+# geektaco smoke test: the real binary over real HTTP, no mocks.
+# Runs in a scratch directory, so live data next to the binary is never touched.
 set -e
 cd "$(dirname "$0")"
+[ -x geektaco ] || make -s
+T=$(mktemp -d)
+cp geektaco "$T/"
+cd "$T"
 
 PORT=8090
-rm -f geektaco.db geektaco.inv geektaco.key
 
 ./geektaco > /tmp/gt.log 2>&1 &
 SRV=$!
-trap 'kill $SRV 2>/dev/null || true' EXIT
+trap 'kill $SRV 2>/dev/null || true; rm -rf "$T"' EXIT
 sleep 0.5
 
 fail() { echo "FAIL: $1"; exit 1; }

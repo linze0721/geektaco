@@ -1,33 +1,33 @@
 # geektaco string table. One name<TAB>value per line.
 # Escapes: \r \n \t \\ . The NUL terminator is implicit.
-# Edit here, then: ./mkstr.py strings.txt strtab.inc
+# Edit here; make regenerates strtab.inc. NUL is not allowed in values.
 s_200	HTTP/1.0 200 OK\r\n
 s_404a	HTTP/1.0 404 Not Found\r\n
 s_302a	HTTP/1.0 302 Found\r\nLocation: 
 s_crlf	\r\n
 s_hdr	Content-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n
-s_head	<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>geektaco</title><style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0c0f10;color:#c6cfc2;font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;max-width:82ch;margin:0 auto;padding:1.6rem 1rem}input,textarea,button{font:inherit;color:#c6cfc2;background:none}a{color:#7fd858;text-decoration:none}a:hover{text-decoration:underline}h1,h2{color:#7fd858;font-weight:400;font-size:14px;margin:1.4rem 0 .3rem}h1{margin-top:0}ul{list-style:none;margin:.3rem 0 1rem}small,.d,label{color:#6d786a}label{display:block;margin-top:.7rem}li{padding:.12rem 0}li small{margin-left:1ch}pre{white-space:pre-wrap;margin:.2rem 0 .8rem 2ch}form{margin:.6rem 0}td form{margin:0;display:inline}input,textarea{width:100%;max-width:60ch;display:block;border:0;border-bottom:1px solid #313a31;padding:.2rem 0}input:focus,textarea:focus{outline:0;border-bottom-color:#7fd858}[type=submit]{width:auto;display:inline;color:#7fd858;cursor:pointer;border:0;padding:0}[type=submit]:hover{text-decoration:underline}table{border-spacing:0}td{padding:0 2ch 0 0;white-space:pre;line-height:1.55}b{color:#7fd858;font-weight:400}.b{margin:.2rem 0 .8rem 2ch}.b p{white-space:pre-wrap;margin:0 0 .5rem}.b pre{margin:.3rem 0 .6rem 2ch}.b code{color:#9ad98a}.b blockquote{color:#6d786a;margin:0 0 .5rem 1ch;padding-left:1ch;border-left:1px solid #313a31}.b ul{list-style:none;margin:0 0 .5rem}.b li:before{content:"- ";color:#6d786a}.b strong{color:#dfe6da;font-weight:400}.b em{font-style:italic}</style>
+s_head	<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>geektaco</title><style>*{margin:0;padding:0}body{background:#0c0f10;color:#c6cfc2;font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;max-width:78ch;margin:auto;padding:.2rem 1rem 1.6rem}a,b,h1,h2,[type=submit]{color:#7fd858}a{text-decoration:none}a:hover,[type=submit]:hover{text-decoration:underline}b,h1,h2,strong,input,textarea{font:inherit}h1,h2{margin:1.4rem 0 .3rem}ul{list-style:none;margin:.3rem 0 1rem}small,.d,label,blockquote,li:before{color:#6d786a}label{display:block;margin-top:.7rem}li{padding:.12rem 0}small{margin-left:1ch}pre,.b p{white-space:pre-wrap}pre{margin:.3rem 0 .6rem 2ch}form{margin:.6rem 0}td form{display:inline}input,textarea{color:inherit;background:none;border:0}[name]{width:100%;max-width:60ch;display:block;border-bottom:1px solid #313a31;padding:.2rem 0}[name]:focus{outline:0;border-bottom-color:#7fd858}[type=submit]{cursor:pointer}table{border-spacing:0}td{padding-right:2ch;white-space:pre;line-height:1.55}.b{margin:.2rem 0 .8rem 2ch}.b p,.b ul{margin:0 0 .5rem}blockquote{margin:0 0 .5rem 1ch;padding-left:1ch;border-left:1px solid #313a31}code{color:#9ad98a}strong{color:#dfe6da}.b li:before{content:"- "}</style>
 s_idx_top	<h1>geektaco $ ls</h1>
 s_th_a	<li><a href="/t/
 s_th_b	">
 s_th_c	</a> <small>
-s_dot	  
+s_dot	 
 s_th_e	</small>
 s_ul_a	<ul>
 s_ul_b	</ul>
 s_empty	<p class=d>no messages yet.
 s_f_a	
-s_f_b	<label class=d>message</label><textarea name=b rows=7 maxlength=399 required></textarea>
+s_f_b	<label>message</label><textarea name=b rows=7 maxlength=399 required></textarea>
 s_newform	<h2>$ post</h2><form method=post action=/new>
-s_newform2	<label class=d>subject</label><input name=t maxlength=79 required>
+s_newform2	<label>subject</label><input name=t maxlength=79 required>
 s_newform3	<input type=submit value="[ send ]"></form>
-s_t_top	<h1>geektaco $ cat</h1><p><a href="/">..</a><h2>
+s_t_top	<h1>geektaco $ cat</h1><p><a href=/>..</a><h2>
 s_h1b	</h2><p class=d>-- 
-s_post_c	</p><div class=b>
+s_post_c	<div class=b>
 s_post_d	</div>
-s_repl_a	<h2>$ reply</h2><form method=post action=/reply><input type=hidden name=p value=
+s_repl_a	<h2>$ reply</h2><form method=post action=/reply><input type=hidden name=p value="
 s_repl_b	<input type=submit value="[ send ]"></form>
-s_404body	<h1>geektaco</h1><p>404: no such page. <a href="/">..</a>
+s_404body	<h1>geektaco</h1><p>404: no such page. <a href=/>..</a>
 s_red_a	<p><a href="
 s_red_c	</a>
 s_untitled	(no subject)
@@ -35,11 +35,11 @@ s_anon	anon
 s_utc	 UTC
 s_dsep	-- :
 s_nv_a	<p class=d>
-s_nv_nw	<a href="
-s_nv_nwt	">prev</a> 
+s_nv_nw	<a href=
+s_nv_nwt	>prev</a> 
 s_nv_pg	~
 s_nv_pge	 
-s_nv_odt	">next</a>
+s_nv_odt	>next</a>
 s_pfx_p	/p/
 s_pfx_t	/t/
 s_slash	/
@@ -47,21 +47,21 @@ s_ck_a	Set-Cookie:
 s_ck_b	=
 s_ck_c	; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000\r\n
 s_403a	HTTP/1.0 403 Forbidden\r\n
-s_joined	<h1>geektaco $ auth</h1><p>ok. <a href="/">..</a>
+s_joined	<h1>geektaco $ auth</h1><p>ok. <a href=/>..</a>
 s_lg_a	<h1>geektaco $ login</h1>
 s_lg_e1	<p><b>wrong name or password.</b>
-s_lg_b	<form method=post action=/login><label class=d>name</label><input name=n maxlength=23 required autofocus><label class=d>password</label><input name=w type=password maxlength=64 required><input type=submit value="[ sign in ]"></form><p class=d>no account? <a href="/register">$ register</a>
+s_lg_b	<form method=post action=/login><label>name</label><input name=n maxlength=23 required autofocus><label>password</label><input name=w type=password maxlength=64 required><input type=submit value="[ sign in ]"></form><p class=d>no account? <a href=/register>$ register</a>
 s_rg_a	<h1>geektaco $ register</h1><p class=d>an invite code is required.
-s_rg_b	<form method=post action=/register><label class=d>name</label><input name=n maxlength=23 required autofocus pattern="[a-zA-Z0-9_-]+"><label class=d>password</label><input name=w type=password minlength=8 maxlength=64 required><label class=d>invite code</label><input name=c maxlength=16 required><input type=submit value="[ create ]"></form><p class=d>have an account? <a href="/login">$ login</a>
+s_rg_b	<form method=post action=/register><label>name</label><input name=n maxlength=23 required autofocus pattern=[a-zA-Z0-9_-]+><label>password</label><input name=w type=password minlength=8 maxlength=64 required><label>invite code</label><input name=c maxlength=16 required><input type=submit value="[ create ]"></form><p class=d>have an account? <a href=/login>$ login</a>
 s_rg_e2	<p><b>that invite is invalid, used, or revoked.</b>
 s_rg_e3	<p><b>that name is taken.</b>
 s_rg_e4	<p><b>names use a-z, 0-9, _ and - only.</b>
 s_rg_e5	<p><b>password must be at least 8 characters.</b>
 s_lg_out	<form method=post action=/logout style=display:inline><input type=submit value="[ sign out ]"></form>
-s_403body	<h1>geektaco</h1><p>403: posting needs an invite. <a href="/join">get in</a>
-s_nav	<p class=d><a href="/login">$ login</a> <a href="/register">$ register</a>
+s_403body	<h1>geektaco</h1><p>403: posting needs an invite. <a href=/join>get in</a>
+s_nav	<p class=d><a href=/login>$ login</a> <a href=/register>$ register</a>
 s_who	<p class=d>signed in as 
-s_adm_hdr	<h1>geektaco $ admin</h1><p><a href="/">..</a>
+s_adm_hdr	<h1>geektaco $ admin</h1><p><a href=/>..</a>
 s_st_a	<h2>$ stat</h2><table>
 s_st_r	<tr><td>
 s_st_v	<td>
@@ -82,9 +82,9 @@ s_adm_top	<h2>$ invites</h2><form method=post action=/admin/inv><input type=subm
 s_adm_inv	<tr><td>
 s_adm_td	<td>
 s_adm_rev	<td><form method=post action=/admin/rev><input type=hidden name=i value=
-s_adm_revb	><input type=submit value="[x]"></form>
+s_adm_revb	><input type=submit value=[x]></form>
 s_adm_del	<td><form method=post action=/admin/del><input type=hidden name=i value=
-s_adm_delb	><input type=submit value="[x]"></form>
+s_adm_delb	><input type=submit value=[x]></form>
 s_adm_mid	</table><h2>$ messages</h2><table>
 s_adm_end	</table>
 s_st_rev	revoked
@@ -97,7 +97,7 @@ s_reply_to	(reply to
 s_paren	)
 s_inv_col	inv 
 s_md_p	<p>
-s_md_pe	</p>
+s_md_pe	
 s_md_pre	<pre><code>
 s_md_pree	</code></pre>
 s_md_bq	<blockquote>
@@ -105,7 +105,7 @@ s_md_bqe	</blockquote>
 s_md_ul	<ul>
 s_md_ule	</ul>
 s_md_li	<li>
-s_md_lie	</li>
+s_md_lie	
 s_md_cd	<code>
 s_md_cde	</code>
 s_md_st	<strong>

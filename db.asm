@@ -54,7 +54,8 @@ db_init:
 .unmap_posts:
     mov rdi, rbx
     mov esi, DB_BYTES
-    mov eax, SYS_munmap
+    push SYS_munmap
+    pop rax
     syscall
     push -1
     pop rax
@@ -76,8 +77,10 @@ map_file:
     push r13
     mov r12, rsi
     mov r13, rdx
-    mov eax, SYS_open
-    mov esi, O_RDWR | O_CREAT
+    push SYS_open
+    pop rax
+    push O_RDWR | O_CREAT
+    pop rsi
     mov edx, DB_MODE
     syscall
     test eax, eax
@@ -85,21 +88,26 @@ map_file:
     mov ebx, eax
     mov edi, eax
     mov rsi, r13
-    mov eax, SYS_ftruncate
+    push SYS_ftruncate
+    pop rax
     syscall
     test eax, eax
     js .close_fail
     xor edi, edi
     mov rsi, r13
-    mov edx, PROT_READ | PROT_WRITE
-    mov r10d, MAP_SHARED             ; syscall argument 4, NOT rcx
+    push PROT_READ | PROT_WRITE
+    pop rdx
+    push MAP_SHARED             ; syscall argument 4, NOT rcx
+    pop r10
     mov r8d, ebx
     xor r9d, r9d
-    mov eax, SYS_mmap
+    push SYS_mmap
+    pop rax
     syscall
     mov r8, rax                     ; keep the full-width runtime pointer
     mov edi, ebx
-    mov eax, SYS_close
+    push SYS_close
+    pop rax
     syscall                         ; the mapping owns the file now
     cmp r8, -4095                   ; only unsigned -4095..-1 are errors
     jae .fail
@@ -123,12 +131,14 @@ map_file:
 .foreign:
     mov rdi, r8
     mov rsi, r13
-    mov eax, SYS_munmap
+    push SYS_munmap
+    pop rax
     syscall
     jmp .fail
 .close_fail:
     mov edi, ebx
-    mov eax, SYS_close
+    push SYS_close
+    pop rax
     syscall
 .fail:
     push -1
@@ -154,12 +164,14 @@ record_count:
 db_rec:
     mov rsi, [db_base]
     mov edx, MAX_POSTS
-    mov ecx, REC_SHIFT
+    push REC_SHIFT
+    pop rcx
     jmp record_ptr
 inv_rec:
     mov rsi, [inv_base]
     mov edx, MAX_INVITES
-    mov ecx, INV_SHIFT
+    push INV_SHIFT
+    pop rcx
 record_ptr:
     ; Check capacity as well as cursor: failed reservations still advance it.
     cmp rdi, rdx
@@ -184,7 +196,8 @@ inv_reserve:
     mov rsi, [inv_base]
     mov edx, MAX_INVITES
 record_reserve:
-    mov eax, 1
+    push 1
+    pop rax
     lock xadd [rsi + H_COUNT], eax
     cmp eax, edx
     jae storage_fail
@@ -198,12 +211,14 @@ storage_fail:
 db_commit:
     push rdx                        ; align the stack for both calls
     call db_rec
-    mov edx, R_TIME
+    push R_TIME
+    pop rdx
     jmp record_commit
 inv_commit:
     push rdx
     call inv_rec
-    mov edx, I_TIME
+    push I_TIME
+    pop rdx
 record_commit:
     test rax, rax
     jz .invalid
@@ -214,7 +229,8 @@ record_commit:
     test eax, eax
     jnz .publish                     ; the stored 32-bit marker must be nonzero
 .fallback:
-    mov eax, 1
+    push 1
+    pop rax
 .publish:
     ; x86-64 TSO does not reorder stores with stores, so this plain mov is
     ; correctly ordered against preceding body writes. R_TIME (or I_TIME)
@@ -225,7 +241,8 @@ record_commit:
     ; process death, so this is only about the machine losing power.
     ; The counter must be atomic: four workers commit concurrently, and a
     ; plain inc would let two threads both see the boundary, or neither.
-    mov eax, 1
+    push 1
+    pop rax
     lock xadd [sync_ctr], eax       ; returns the PRE-increment value
     inc eax                         ; so test the count, not the old index:
     and eax, SYNC_EVERY - 1         ; otherwise commit #1 flushes a clean map
@@ -236,8 +253,10 @@ record_commit:
     ; and passing DB_BYTES avoids error-prone page-alignment arithmetic.
     mov rdi, [db_base]
     mov esi, DB_BYTES
-    mov edx, MS_ASYNC
-    mov eax, SYS_msync
+    push MS_ASYNC
+    pop rdx
+    push SYS_msync
+    pop rax
     syscall                         ; return ignored: the record is already
                                     ; published and visible; a failed flush
                                     ; must not fail the commit.
@@ -252,8 +271,10 @@ record_commit:
 db_sync:
     mov rdi, [db_base]
     mov esi, DB_BYTES
-    mov edx, MS_SYNC
-    mov eax, SYS_msync
+    push MS_SYNC
+    pop rdx
+    push SYS_msync
+    pop rax
     syscall
     test eax, eax
     js storage_fail
